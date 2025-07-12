@@ -1,0 +1,14 @@
+[
+  {
+    "priv": "PRIVATE_KEY_1_B64",
+    "addr": "OCTRA_ADDRESS_1",
+    "rpc": "https://octra.network",
+    "name": "Wallet1"
+  },
+  {
+    "priv": "PRIVATE_KEY_2_B64",
+    "addr": "OCTRA_ADDRESS_2",
+    "rpc": "https://octra.network",
+    "name": "Wallet2"
+  }
+]
