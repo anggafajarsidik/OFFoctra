@@ -2,7 +2,7 @@
 
 Welcome to the Octra Tools Repository — a curated collection of powerful command-line tools designed for seamless and secure interaction with the Octra network.
 
-This script is a simplified modification of the original, offering a cleaner interface, enhanced ease of use for daily operations, and full support for proxy connections.
+This script is a simplified modification of the original, offering a cleaner interface, enhanced ease of use for daily operations.
 ---
 
 ## 👛 Octra Wallet Generator
