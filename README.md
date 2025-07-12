@@ -26,7 +26,7 @@ A simple, interactive, command-line tool to securely generate wallets for the Oc
 #### Steps
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/anggafajarsidik/OFFoctra](https://github.com/anggafajarsidik/OFFoctra)
+    git clone https://github.com/anggafajarsidik/OFFoctra
     ```
 2.  **Navigate to the project directory:**
     ```bash
@@ -45,7 +45,7 @@ A simple, interactive, command-line tool to securely generate wallets for the Oc
     ```
 2.  **The script will ask you for input:**
     ```
-    [cite_start]How many wallets would you like to generate? [cite: 13]
+    How many wallets would you like to generate?
     ```
 3.  **Type the desired number and press `Enter`**. The script will then generate and save the wallets.
 
