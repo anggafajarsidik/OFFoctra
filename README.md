@@ -147,7 +147,7 @@ You must have **Python 3.8 or higher** installed on your system.
 #### Steps
 1.  **Clone the repository (if you haven't already):**
     ```bash
-    git clone https://github.com/anggafajarsidik/OFFoctra]
+    git clone https://github.com/anggafajarsidik/OFFoctra
     ```
 2.  **Navigate to the project directory:**
     ```bash
