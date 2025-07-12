@@ -146,22 +146,15 @@ You must have **Python 3.8 or higher** installed on your system.
 #### Steps
 1.  **Clone the repository (if you haven't already):**
     ```bash
-    git clone [https://github.com/anggafajarsidik/OFFoctra](https://github.com/anggafajarsidik/OFFoctra)
+    git clone https://github.com/anggafajarsidik/OFFoctra]
     ```
 2.  **Navigate to the project directory:**
     ```bash
-    cd OFFoctra # Or the specific directory where the CLI script is located if different
+    cd OFFoctra/CLI
     ```
 3.  **Install Python dependencies:**
     ```bash
-    pip install -r requirements.txt
-    ```
-    *(Note: Create a `requirements.txt` file in the same directory as the Python script with the following content:)*
-    ```
-    aiohttp
-    PyNaCl
-    cryptography
-    pyperclip # Optional, for clipboard copy feature
+    pip3 install -r requirements.txt
     ```
 4.  **Prepare your wallet data:**
     * Create a `wallet.json` file in the main directory. This file should contain your wallet private keys, addresses, and RPC URLs.
@@ -170,7 +163,7 @@ You must have **Python 3.8 or higher** installed on your system.
             {
               "priv": "YOUR_PRIVATE_KEY_B64",
               "addr": "YOUR_OCTRA_ADDRESS",
-              "rpc": "http://localhost:8080",
+              "rpc": "https://octra.network",
               "name": "MyMainWallet"
             }
             ```
@@ -180,14 +173,14 @@ You must have **Python 3.8 or higher** installed on your system.
               {
                 "priv": "PRIVATE_KEY_1_B64",
                 "addr": "OCTRA_ADDRESS_1",
-                "rpc": "http://localhost:8080",
-                "name": "WalletA"
+                "rpc": "https://octra.network",
+                "name": "Wallet1"
               },
               {
                 "priv": "PRIVATE_KEY_2_B64",
                 "addr": "OCTRA_ADDRESS_2",
-                "rpc": "[https://some.octra.node:8080](https://some.octra.node:8080)",
-                "name": "WalletB"
+                "rpc": "https://octra.network",
+                "name": "Wallet2"
               }
             ]
             ```
@@ -198,7 +191,7 @@ You must have **Python 3.8 or higher** installed on your system.
 
 1.  **Run the script from your terminal:**
     ```bash
-    python your_script_name.py # Replace 'your_script_name.py' with the actual filename of the Python CLI script
+    python3 cli.py
     ```
 2.  **The script will load your wallets and present an interactive menu.**
 3.  **Follow the on-screen prompts** to select a wallet (or all wallets) and execute commands like sending transactions, encrypting/decrypting balances, or managing private transfers.
