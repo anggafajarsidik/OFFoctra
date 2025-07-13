@@ -5,18 +5,16 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
-// Function to get user input (asynchronous)
 function askQuestion(query) {
   return new Promise(resolve => rl.question(query, ans => {
     if (!ans || ans.trim() === "") {
       console.log("Input cannot be empty. Please enter a value.");
-      return askQuestion(query).then(resolve); // Repeat question if empty
+      return askQuestion(query).then(resolve);
     }
     resolve(ans.trim());
   }));
 }
 
-// Function to get number input from user (asynchronous)
 async function getNumberInput(promptMessage) {
   let input;
   let isValid = false;
@@ -33,39 +31,33 @@ async function getNumberInput(promptMessage) {
 }
 
 async function runScript() {
-  // Ask for the number of configurations to create
   const numberOfConfigs = await getNumberInput("How many wallet configurations do you want to create? ");
 
   const allWalletConfigs = [];
 
   for (let i = 0; i < numberOfConfigs; i++) {
     console.log(`\n--- Entering data for Wallet #${i + 1} ---`);
-    // Ask for Octra Address first
     const octraAddress = await askQuestion(`Enter the Octra Address for Wallet #${i + 1}: `);
 
-    // Then ask for Private Key (B64)
     const privateKeyB64 = await askQuestion(`Enter the Private Key (B64) for Wallet #${i + 1}: `);
 
-    // Create the object with the desired format
     const walletConfig = {
       "priv": privateKeyB64,
       "addr": octraAddress,
       "rpc": "https://octra.network",
-      "name": `Wallet${i + 1}` // Wallet name will increment
+      "name": `Wallet${i + 1}`
     };
     allWalletConfigs.push(walletConfig);
   }
 
-  // Display all results in JSON format
   console.log("\n--- Here are all your wallet configurations: ---");
   const jsonOutput = JSON.stringify(allWalletConfigs, null, 2);
   console.log(jsonOutput);
 
-  // Provide confirmation and instructions to the user
   console.log(`\n--- Done! ${numberOfConfigs} wallet configuration(s) have been generated and displayed above. ---`);
   console.log("Now you can copy the JSON Output above and use it for scripts that need it.");
 
-  rl.close(); // Important to close the readline interface
+  rl.close();
 }
 
 runScript();
