@@ -1446,7 +1446,7 @@ async def private_transfer_ui(wallet_obj):
                 break
 
         while True:
-            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between private transfers (Recommend 120 second to avoid ERROR duplicate transfer)?: {c['r']}")
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between private transfers (Recommend 60 second to avoid ERROR duplicate transfer)?: {c['r']}")
             try:
                 min_delay = float(min_delay_input.strip())
                 if min_delay < 0: raise ValueError
@@ -1455,7 +1455,7 @@ async def private_transfer_ui(wallet_obj):
                 print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
 
         while True:
-            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (seconds)?: {c['r']}")
+            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (Recommend 120 second to avoid ERROR duplicate transfer)?: {c['r']}")
             try:
                 max_delay = float(max_delay_input.strip())
                 if max_delay < min_delay: raise ValueError
@@ -2627,7 +2627,7 @@ async def private_transfer_all_wallets():
                 print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
 
         while True:
-            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (seconds)?: {c['r']}")
+            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (Recommend 120 second to avoid ERROR duplicate transfer)?: {c['r']}")
             try:
                 max_delay = float(max_delay_input.strip())
                 if max_delay < min_delay: raise ValueError
