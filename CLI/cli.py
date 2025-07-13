@@ -1721,13 +1721,21 @@ async def _run_daily_multi_send_for_wallet(wallet_obj, recipients_for_daily_run,
         print(f"\n{c['B']}  Starting Daily Run for Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
 
         n, b = None, None
-        for attempt in range(15):
+        attempt = 0
+        while True:
             n, b = await st(wallet_obj)
             if n is not None and b is not None:
+                print(f"{c['g']}    Successfully retrieved balance/nonce for {wallet_obj.name}.{c['r']}")
                 break
-            print(f"{c['y']}    Attempt {attempt+1}/3: Failed to get balance/nonce for {wallet_obj.name}. Retrying...{c['r']}")
-            await asyncio.sleep(2)
-
+            
+            attempt += 1
+            print(f"{c['y']}    Attempt {attempt}: Failed to get balance/nonce for {wallet_obj.name} I recommend that you execute the Refresh Wallet command if your balance is not showing—this might be due to an RPC error. Retrying indefinitely...{c['r']}")
+            await asyncio.sleep(5)
+            
+            if stop_flag.is_set():
+                print(f"{c['y']}    Stopping balance/nonce retrieval due to user interrupt.{c['r']}")
+                return (0, 0)
+            
         if n is None or b is None:
             print(f"{c['R']}    Failed to get balance/nonce after multiple attempts. Skipping wallet for this daily run.{c['r']}\n")
             await results_queue_daily.put(('fail_setup', wallet_obj.name, num_runs_per_wallet * len(recipients_for_daily_run)))
@@ -1800,12 +1808,20 @@ async def _run_daily_multi_send_single_wallet(wallet_obj, recipients_for_daily_r
         print(f"\n{c['B']}  Starting Daily Run for SELECTED Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
 
         n, b = None, None
-        for attempt in range(3):
+        attempt = 0
+        while True:
             n, b = await st(wallet_obj)
             if n is not None and b is not None:
+                print(f"{c['g']}    Successfully retrieved balance/nonce for {wallet_obj.name}.{c['r']}")
                 break
-            print(f"{c['y']}    Attempt {attempt+1}/3: Failed to get balance/nonce. Retrying...{c['r']}")
-            await asyncio.sleep(2)
+            
+            attempt += 1
+            print(f"{c['y']}    Attempt {attempt}: Failed to get balance/nonce for {wallet_obj.name} I recommend that you execute the Refresh Wallet command if your balance is not showing—this might be due to an RPC error. Retrying indefinitely...{c['r']}")
+            await asyncio.sleep(5)
+            
+            if stop_flag.is_set():
+                print(f"{c['y']}    Stopping balance/nonce retrieval due to user interrupt.{c['r']}")
+                return (0, 0)
 
         if n is None or b is None:
             print(f"{c['R']}    Failed to get balance/nonce after multiple attempts. Skipping this daily run.{c['r']}\n")
