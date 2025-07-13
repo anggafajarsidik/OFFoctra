@@ -229,11 +229,11 @@ Once the script is running, you will be presented with a main menu. Here are som
 
 ## ⚠️ Disclaimer & Security Guidelines
 
-* These scripts are provided "as-is" for educational and experimental purposes only[cite: 17]. [cite_start]The author and contributors are not responsible for any damages, losses, or legal issues arising from their use[cite: 18].
-* **Use at your own risk.** You are solely responsible for your actions and any potential loss of funds[cite: 19].
-* The keys generated and managed by these tools control access to your crypto assets[cite: 20].
-* For generating or managing wallets that will hold significant value, it is **highly recommended** to run these scripts on a secure, **air-gapped (offline) computer** to prevent any possibility of exposure to malware or network attacks[cite: 21].
-* **NEVER share your `Mnemonic Phrase` or `Private Key` with anyone.** Anyone who has them can steal your funds[cite: 22].
-* Store all generated `.txt` files containing wallet details in a secure, encrypted, offline location[cite: 23].
+* These scripts are provided "as-is" for educational and experimental purposes only. The author and contributors are not responsible for any damages, losses, or legal issues arising from their use.
+* **Use at your own risk.** You are solely responsible for your actions and any potential loss of funds.
+* The keys generated and managed by these tools control access to your crypto assets.
+* For generating or managing wallets that will hold significant value, it is **highly recommended** to run these scripts on a secure, **air-gapped (offline) computer** to prevent any possibility of exposure to malware or network attacks.
+* **NEVER share your `Mnemonic Phrase` or `Private Key` with anyone.** Anyone who has them can steal your funds.
+* Store all generated `.txt` files containing wallet details in a secure, encrypted, offline location.
 
 ---
