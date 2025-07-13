@@ -1721,7 +1721,7 @@ async def _run_daily_multi_send_for_wallet(wallet_obj, recipients_for_daily_run,
         print(f"\n{c['B']}  Starting Daily Run for Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
 
         n, b = None, None
-        for attempt in range(3):
+        for attempt in range(15):
             n, b = await st(wallet_obj)
             if n is not None and b is not None:
                 break
