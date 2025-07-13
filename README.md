@@ -10,19 +10,19 @@ This script is a simplified modification of the original, offering a cleaner int
 ![Node.js](https://img.shields.io/badge/Node.js-18.x+-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
-A simple, interactive, command-line tool to securely generate wallets for the Octra network. [cite_start]All keys are generated offline, and full wallet details are automatically saved to a local `.txt` file for your records[cite: 2].
+A simple, interactive, command-line tool to securely generate wallets for the Octra network. All keys are generated offline, and full wallet details are automatically saved to a local `.txt` file for your records.
 
 ### ✨ Features (Wallet Generator)
-* **Interactive Prompt:** No need for command-line arguments. [cite_start]The script asks you how many wallets you want to create[cite: 3, 4].
-* [cite_start]**Multiple Wallet Generation:** Create one or hundreds of wallets in a single run[cite: 5].
-* **Secure & Offline:** All cryptographic operations happen locally on your machine. [cite_start]The script makes no internet connections, ensuring your keys are never exposed[cite: 6, 7].
-* [cite_start]**Automatic File Saving:** Each generated wallet's full details are saved to a unique, timestamped `.txt` file for maximum security and easy management[cite: 8].
-* [cite_start]**Clean Console Output:** The terminal displays only the most essential information (Address, Public/Private Keys), while the comprehensive data is stored securely in the generated files[cite: 9].
+* **Interactive Prompt:** No need for command-line arguments. The script asks you how many wallets you want to create.
+* **Multiple Wallet Generation:** Create one or hundreds of wallets in a single run.
+* **Secure & Offline:** All cryptographic operations happen locally on your machine. The script makes no internet connections, ensuring your keys are never exposed.
+* **Automatic File Saving:** Each generated wallet's full details are saved to a unique, timestamped `.txt` file for maximum security and easy management.
+* **Clean Console Output:** The terminal displays only the most essential information (Address, Public/Private Keys), while the comprehensive data is stored securely in the generated files.
 
 ### 🛠️ Installation (Wallet Generator)
 
 #### Prerequisites
-[cite_start]You must have **Node.js** (version 18.x or higher) installed on your system[cite: 10].
+You must have **Node.js** (version 18.x or higher) installed on your system.
 
 #### Steps
 1.  **Clone the repository:**
