@@ -11,7 +11,6 @@ import traceback
 import platform
 import signal as sys_signal
 
-# --- Warna ANSI Escape Codes ---
 c = {
     'r': '\033[0m',
     'b': '\033[34m',
@@ -23,11 +22,11 @@ c = {
     'w': '\033[37m'
 }
 
-# --- Global Variables ---
 b58 = re.compile(r"^oct[1-9A-HJ-NP-Za-km-z]{44}$")
 μ = 1_000_000
 executor = ThreadPoolExecutor(max_workers=1)
 stop_flag = threading.Event()
+cancel_countdown_flag = threading.Event()
 
 wallets_available = []
 current_selection = None
@@ -35,15 +34,16 @@ current_selection = None
 OCTRASCAN_TX_URL = "https://octrascan.io/tx/"
 PROXY_FILE = "proxy.txt"
 
-# --- Daily Multi Send Configuration (Set default values here) ---
 DAILY_MODE_ACTIVE = False
 DAILY_RUNS_PER_WALLET_PER_DAY = 0
 DAILY_AMOUNT_PER_RECIPIENT = 0.0
 DAILY_MIN_DELAY = 0.0
 DAILY_MAX_DELAY = 0.0
-DAILY_INTERVAL_HOURS = 24.0 # Default daily interval
+DAILY_INTERVAL_HOURS = 24.0
+DAILY_RECIPIENT_LIMIT = 0
+DAILY_MODE_TARGET_WALLET = None
+DAILY_MODE_RETRIES = 0
 
-# --- Global Aiohttp Session (for general requests like get_public_ip_external) ---
 global_aiohttp_session = None
 
 async def get_global_aiohttp_session():
@@ -53,16 +53,15 @@ async def get_global_aiohttp_session():
     
     connector = aiohttp.TCPConnector(ssl=ssl.create_default_context(), force_close=True)
     global_aiohttp_session = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=10), # Short timeout for IP check
+        timeout=aiohttp.ClientTimeout(total=10),
         connector=connector
     )
     return global_aiohttp_session
 
-# --- Core Networking Function (DEFINED FIRST for dependencies) ---
 async def get_public_ip_external(proxy_url=None):
     try:
-        session_ip = await get_global_aiohttp_session() # Uses the global session
-        async with session_ip.get('https://api.ipify.org?format=json', proxy=proxy_url, ssl=False) as resp_ip: # ssl=False for ipify.org without cert issues
+        session_ip = await get_global_aiohttp_session()
+        async with session_ip.get('https://api.ipify.org?format=json', proxy=proxy_url, ssl=False) as resp_ip:
             if resp_ip.status == 200:
                 data = await resp_ip.json()
                 return data.get('ip')
@@ -70,7 +69,6 @@ async def get_public_ip_external(proxy_url=None):
         pass
     return "Unknown"
 
-# --- Session Closing Function ---
 async def close_all_sessions():
     for wallet in wallets_available:
         if hasattr(wallet, 'aiohttp_session') and wallet.aiohttp_session and not wallet.aiohttp_session.closed:
@@ -85,13 +83,12 @@ async def close_all_sessions():
         except Exception:
             pass
 
-# --- Signal Handler ---
 def signal_handler(sig, frame):
     stop_flag.set()
+    cancel_countdown_flag.set()
     asyncio.create_task(close_all_sessions())
     sys.exit(0)
 
-# --- Wallet Class Definition ---
 class Wallet:
     def __init__(self, priv, addr, rpc, name=None, proxy=None):
         self.priv = priv
@@ -134,8 +131,6 @@ class Wallet:
             self.proxy_public_ip = await get_public_ip_external(self.proxy)
         return self.proxy_public_ip
 
-# --- Basic Utility Functions ---
-
 def cls():
     os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -145,24 +140,125 @@ def sz():
 def at(x, y, t, cl=''):
     print(f"{cl}{t}{c['r']}")
 
-def inp(x, y):
-    return input()
-
 async def ainp(x, y, prompt=""):
     try:
         return await asyncio.get_event_loop().run_in_executor(executor, input, prompt)
-    except:
+    except Exception:
         stop_flag.set()
         return ''
 
+async def countdown_timer(duration_seconds, message_prefix="Next run in"):
+    cancel_countdown_flag.clear()
+    start_time = time.time()
+    end_time = start_time + duration_seconds
+
+    while time.time() < end_time and not stop_flag.is_set() and not cancel_countdown_flag.is_set():
+        remaining_seconds = int(end_time - time.time())
+        if remaining_seconds < 0:
+            remaining_seconds = 0
+
+        hours = remaining_seconds // 3600
+        minutes = (remaining_seconds % 3600) // 60
+        seconds = remaining_seconds % 60
+
+        countdown_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        print(f"\r{c['c']}{message_prefix} {countdown_str}. (Press Ctrl+C to stop daily mode){c['r']}", end='', flush=True)
+        await asyncio.sleep(1)
+
+    print(f"\r{' ' * (len(message_prefix) + 20 + len('(Press Ctrl+C to stop daily mode)'))}", end='', flush=True)
+
+async def awaitkey_simple(prompt_text=f"{c['y']}Press Enter to continue...{c['r']}"):
+    input_future = asyncio.get_event_loop().run_in_executor(executor, input, prompt_text)
+    try:
+        await input_future
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        stop_flag.set()
+
 def wait():
-    input(f"{c['y']}Press Enter to continue...{c['r']}")
+    asyncio.run(awaitkey_simple(prompt_text=f"{c['y']}Press Enter to continue...{c['r']}"))
 
 async def awaitkey():
-    await asyncio.get_event_loop().run_in_executor(executor, input, f"{c['y']}Press Enter to continue...{c['r']}")
+    await awaitkey_simple(prompt_text=f"{c['y']}Press Enter to continue...{c['r']}")
+
+async def get_recipient_address_from_user(allow_random_from_file=True, prompt_text="Enter recipient address: "):
+    recipients = []
+    recipients_file = "recipentaddress.txt"
+
+    if allow_random_from_file and os.path.exists(recipients_file):
+        try:
+            with open(recipients_file, 'r') as f:
+                for line in f:
+                    addr_read = line.strip()
+                    if b58.match(addr_read):
+                        recipients.append(addr_read)
+            
+            if recipients:
+                print(f"{c['g']}Loaded {len(recipients)} valid addresses from '{recipients_file}'.{c['r']}")
+                choice = await ainp(0, 0, f"{c['y']}Use a random address from '{recipients_file}'? [y/n/esc to cancel]: {c['r']}")
+                choice_lower = choice.strip().lower()
+
+                if choice_lower == 'y':
+                    return random.choice(recipients)
+                elif choice_lower == 'n':
+                    return await ainp(0, 0, f"{c['y']}{prompt_text} (or [esc] to cancel): {c['r']}")
+                elif choice_lower == 'esc':
+                    return 'esc'
+            else:
+                print(f"{c['y']}No valid recipient addresses found in '{recipients_file}'.{c['r']}")
+                return await ainp(0, 0, f"{c['y']}{prompt_text} (or [esc] to cancel): {c['r']}")
+        except Exception as e:
+            print(f"{c['R']}Error loading '{recipients_file}': {e}. Please enter address manually.{c['r']}")
+            return await ainp(0, 0, f"{c['y']}{prompt_text} (or [esc] to cancel): {c['r']}")
+    
+    return await ainp(0, 0, f"{c['y']}{prompt_text} (or [esc] to cancel): {c['r']}")
+
+async def load_and_limit_recipients_from_file(file_path="recipentaddress.txt", prompt_limit=True):
+    recipients_original = []
+    
+    if not os.path.exists(file_path):
+        print(f"{c['R']}Error: '{file_path}' not found in the current directory.{c['r']}")
+        return None
+
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                addr_read = line.strip()
+                if b58.match(addr_read):
+                    recipients_original.append(addr_read)
+                elif addr_read:
+                    print(f"{c['y']}Warning: Invalid address '{addr_read[:20]}...' in file. Skipping.{c['r']}")
+                    await asyncio.sleep(0.05)
+
+        if not recipients_original:
+            print(f"{c['R']}No valid recipient addresses found in '{file_path}' after filtering.{c['r']}")
+            return None
+        
+        if prompt_limit:
+            while True:
+                limit_input = await ainp(0, 0, f"\n{c['y']}How many unique recipients from the file do you want to include in each run (Max {len(recipients_original)}, 0 for all)?: {c['r']}")
+                try:
+                    limit = int(limit_input.strip())
+                    if limit < 0 or limit > len(recipients_original):
+                        print(f"{c['R']}{c['B']}Invalid number. Please enter a number between 0 and {len(recipients_original)}.{c['r']}")
+                    else:
+                        return recipients_original if limit == 0 else random.sample(recipients_original, limit)
+                except ValueError:
+                    print(f"{c['R']}{c['B']}Invalid input. Please enter a number.{c['r']}")
+        else:
+            if DAILY_RECIPIENT_LIMIT == 0:
+                return recipients_original
+            else:
+                return random.sample(recipients_original, min(DAILY_RECIPIENT_LIMIT, len(recipients_original)))
+
+    except Exception as e:
+        print(f"{c['R']}Error loading '{file_path}': {e}.{c['r']}")
+        return None
 
 def fill():
-    cls()
+    os.system('cls' if os.name == 'nt' else 'clear')
 
 def box(x, y, w, h, t=""):
     print(f"\n--- {c['B']}{t}{c['r']} ---")
@@ -177,8 +273,6 @@ async def spin_animation(x, y, msg):
             await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         print(f"\r{' ' * (len(msg) + 3)}", end='', flush=True)
-
-# --- Cryptography Functions ---
 
 def derive_encryption_key(privkey_b64):
     privkey_bytes = base64.b64decode(privkey_b64)
@@ -276,8 +370,6 @@ def decrypt_private_amount(encrypted_data, shared_secret):
     except:
         return None
 
-# --- API Interaction Functions (Defined hierarchically) ---
-
 async def req(m, p, d=None, t=30, rpc_url=None, wallet_obj_for_proxy=None):
     target_rpc = rpc_url
     if not target_rpc:
@@ -324,9 +416,15 @@ async def req(m, p, d=None, t=30, rpc_url=None, wallet_obj_for_proxy=None):
         return 0, str(e), None
     finally:
         if not wallet_obj_for_proxy and session_to_use and not session_to_use.closed:
-            await session_to_use.close()
+            if session_to_use is global_aiohttp_session:
+                pass
+            else:
+                try:
+                    await session_to_use.close()
+                except Exception:
+                    pass
 
-async def req_private(path, method='GET', data=None, wallet=None):
+async def req_private(path, method='GET', data=None, wallet=None, retries=0):
     wallet_obj = wallet
     if not wallet_obj or not wallet_obj.priv:
         return False, {"error": "No active wallet or private key available."}
@@ -336,27 +434,44 @@ async def req_private(path, method='GET', data=None, wallet=None):
     session_to_use = await wallet_obj.get_or_create_session()
     proxy_to_use = wallet_obj.proxy
 
-    try:
-        url = f"{wallet_obj.rpc}{path}"
-        kwargs = {'headers': headers}
-        if method == 'POST' and data:
-            kwargs['json'] = data
-        if proxy_to_use:
-            kwargs['proxy'] = proxy_to_use
+    for attempt in range(retries + 1):
+        try:
+            url = f"{wallet_obj.rpc}{path}"
+            kwargs = {'headers': headers}
+            if method == 'POST' and data:
+                kwargs['json'] = data
+            if proxy_to_use:
+                kwargs['proxy'] = proxy_to_use
 
-        async with getattr(session_to_use, method.lower())(url, **kwargs) as resp:
-            text = await resp.text()
-            
-            if resp.status == 200:
-                try:
-                    return True, json.loads(text) if text.strip() else {}
-                except:
-                    return False, {"error": "Invalid JSON response"}
-            else:
-                return False, {"error": f"HTTP {resp.status}"}
+            async with getattr(session_to_use, method.lower())(url, **kwargs) as resp:
+                text = await resp.text()
                 
-    except Exception as e:
-        return False, {"error": str(e)}
+                if resp.status == 200:
+                    try:
+                        return True, json.loads(text) if text.strip() else {}
+                    except:
+                        return False, {"error": "Invalid JSON response"}
+                else:
+                    error_msg = {"error": f"HTTP {resp.status} - {text[:100]}"}
+                    if attempt < retries:
+                        print(f"{c['y']}    Retry {attempt+1}/{retries}: Private request failed! Error: {error_msg['error']}. Retrying...{c['r']}")
+                        await asyncio.sleep(random.uniform(1, 3))
+                    else:
+                        return False, error_msg
+                        
+        except asyncio.TimeoutError:
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Private request timed out. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+            else:
+                return False, {"error": "Request timed out"}
+        except Exception as e:
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Private request failed due to error: {e}. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+            else:
+                return False, {"error": str(e)}
+    return False, {"error": "Max retries exceeded"}
 
 async def st(wallet_obj):
     now = time.time()
@@ -396,8 +511,8 @@ async def st(wallet_obj):
     wallet_obj.update_cache(cn, cb)
     return cn, cb
 
-async def get_encrypted_balance(wallet_obj):
-    ok, result = await req_private(f"/view_encrypted_balance/{wallet_obj.addr}", wallet=wallet_obj)
+async def get_encrypted_balance(wallet_obj, retries=0):
+    ok, result = await req_private(f"/view_encrypted_balance/{wallet_obj.addr}", wallet=wallet_obj, retries=retries)
     
     if ok:
         try:
@@ -413,8 +528,8 @@ async def get_encrypted_balance(wallet_obj):
     else:
         return None
 
-async def encrypt_balance(amount, wallet_obj):
-    enc_data = await get_encrypted_balance(wallet_obj)
+async def encrypt_balance(amount, wallet_obj, retries=0):
+    enc_data = await get_encrypted_balance(wallet_obj, retries=retries)
     if not enc_data:
         return False, {"error": "cannot get balance"}
     
@@ -436,8 +551,8 @@ async def encrypt_balance(amount, wallet_obj):
     else:
         return False, {"error": j.get("error", t) if j else t}
 
-async def decrypt_balance(amount, wallet_obj):
-    enc_data = await get_encrypted_balance(wallet_obj)
+async def decrypt_balance(amount, wallet_obj, retries=0):
+    enc_data = await get_encrypted_balance(wallet_obj, retries=retries)
     if not enc_data:
         return False, {"error": "cannot get balance"}
     
@@ -462,43 +577,68 @@ async def decrypt_balance(amount, wallet_obj):
     else:
         return False, {"error": j.get("error", t) if j else t}
 
-async def get_address_info(address, rpc_url):
+async def get_address_info(address, rpc_url, retries=0):
     s, t, j = await req('GET', f'/address/{address}', rpc_url=rpc_url)
     if s == 200:
         return j
+    for attempt in range(retries):
+        await asyncio.sleep(random.uniform(0.5, 2))
+        s, t, j = await req('GET', f'/address/{address}', rpc_url=rpc_url)
+        if s == 200: return j
     return None
 
-async def get_public_key(address, rpc_url):
+async def get_public_key(address, rpc_url, retries=0):
     s, t, j = await req('GET', f'/public_key/{address}', rpc_url=rpc_url)
     if s == 200:
         return j.get("public_key")
+    for attempt in range(retries):
+        await asyncio.sleep(random.uniform(0.5, 2))
+        s, t, j = await req('GET', f'/public_key/{address}', rpc_url=rpc_url)
+        if s == 200: return j.get("public_key")
     return None
 
-async def create_private_transfer(to_addr, amount, wallet_obj):
-    addr_info = await get_address_info(to_addr, wallet_obj.rpc)
-    if not addr_info or not addr_info.get("has_public_key"):
-        return False, {"error": "Recipient has no public key"}
-    
-    to_public_key = await get_public_key(to_addr, wallet_obj.rpc)
-    if not to_public_key:
-        return False, {"error": "Cannot get recipient public key"}
-    
-    data = {
-        "from": wallet_obj.addr,
-        "to": to_addr,
-        "amount": str(int(amount * μ)),
-        "from_private_key": wallet_obj.priv,
-        "to_public_key": to_public_key
-    }
-    
-    s, t, j = await req('POST', '/private_transfer', data, rpc_url=wallet_obj.rpc, wallet_obj_for_proxy=wallet_obj)
-    if s == 200:
-        return True, j
-    else:
-        return False, {"error": j.get("error", t) if j else t}
+async def create_private_transfer(to_addr, amount, wallet_obj, retries=0):
+    for attempt in range(retries + 1):
+        addr_info = await get_address_info(to_addr, wallet_obj.rpc, retries=1)
+        if not addr_info or not addr_info.get("has_public_key"):
+            error_msg = {"error": "Recipient has no public key"}
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Transfer failed! Error: {error_msg['error']}. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+                continue
+            return False, error_msg
+        
+        to_public_key = await get_public_key(to_addr, wallet_obj.rpc, retries=1)
+        if not to_public_key:
+            error_msg = {"error": "Cannot get recipient public key"}
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Transfer failed! Error: {error_msg['error']}. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+                continue
+            return False, error_msg
+        
+        data = {
+            "from": wallet_obj.addr,
+            "to": to_addr,
+            "amount": str(int(amount * μ)),
+            "from_private_key": wallet_obj.priv,
+            "to_public_key": to_public_key
+        }
+        
+        s, t, j = await req('POST', '/private_transfer', data, rpc_url=wallet_obj.rpc, wallet_obj_for_proxy=wallet_obj)
+        if s == 200:
+            return True, j
+        else:
+            error_msg = {"error": j.get("error", t) if j else t}
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Private transfer failed! Error: {error_msg['error']}. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+            else:
+                return False, error_msg
+    return False, {"error": "Max retries exceeded for private transfer creation"}
 
-async def get_pending_transfers(wallet_obj):
-    ok, result = await req_private(f"/pending_private_transfers?address={wallet_obj.addr}", wallet=wallet_obj)
+async def get_pending_transfers(wallet_obj, retries=0):
+    ok, result = await req_private(f"/pending_private_transfers?address={wallet_obj.addr}", wallet=wallet_obj, retries=retries)
     
     if ok:
         transfers = result.get("pending_transfers", [])
@@ -506,18 +646,25 @@ async def get_pending_transfers(wallet_obj):
     else:
         return []
 
-async def claim_private_transfer(transfer_id, wallet_obj):
-    data = {
-        "recipient_address": wallet_obj.addr,
-        "private_key": wallet_obj.priv,
-        "transfer_id": transfer_id
-    }
-    
-    s, t, j = await req('POST', '/claim_private_transfer', data, rpc_url=wallet_obj.rpc, wallet_obj_for_proxy=wallet_obj)
-    if s == 200:
-        return True, j
-    else:
-        return False, {"error": j.get("error", t) if j else t}
+async def claim_private_transfer(transfer_id, wallet_obj, retries=0):
+    for attempt in range(retries + 1):
+        data = {
+            "recipient_address": wallet_obj.addr,
+            "private_key": wallet_obj.priv,
+            "transfer_id": transfer_id
+        }
+        
+        s, t, j = await req('POST', '/claim_private_transfer', data, rpc_url=wallet_obj.rpc, wallet_obj_for_proxy=wallet_obj)
+        if s == 200:
+            return True, j
+        else:
+            error_msg = {"error": j.get("error", t) if j else t}
+            if attempt < retries:
+                print(f"{c['y']}    Retry {attempt+1}/{retries}: Claim failed! Error: {error_msg['error']}. Retrying...{c['r']}")
+                await asyncio.sleep(random.uniform(1, 3))
+            else:
+                return False, error_msg
+    return False, {"error": "Max retries exceeded for private transfer claim"}
 
 async def gh(wallet_obj):
     now = time.time()
@@ -603,8 +750,6 @@ async def snd(tx, wallet_obj, retries=0):
         else:
             return False, error_msg, 0, j
 
-# --- UI Display Functions ---
-
 async def expl(wallet_obj=None):
     cls()
     print(f"\n--- {c['B']}Wallet Explorer{c['r']} ---")
@@ -629,13 +774,13 @@ async def expl(wallet_obj=None):
             enc_data = await get_encrypted_balance(wallet_obj)
             if enc_data:
                 print(f"  {c['c']}Encrypted Balance:{c['r']} {c['B']}{c['y']}{enc_data['encrypted']:.6f} oct{c['r']}")
-                
+        
                 pending = await get_pending_transfers(wallet_obj)
                 if pending:
                     print(f"  {c['c']}Claimable:{c['r']} {c['B']}{c['g']}{len(pending)} transfers{c['r']}")
         except Exception as e:
             print(f"  {c['R']}Error getting encrypted balance: {e}{c['r']}")
-        
+    
         _, _, j = await req('GET', '/staging', 2, rpc_url=wallet_obj.rpc, wallet_obj_for_proxy=wallet_obj)
         sc = len([tx for tx in j.get('staged_transactions', []) if tx.get('from') == wallet_obj.addr]) if j else 0
         print(f"  {c['c']}Staging:{c['r']} {f'{sc} pending' if sc else 'none'} {c['y'] if sc else c['w']}\n")
@@ -653,6 +798,7 @@ async def expl(wallet_obj=None):
                 if tx['hash'] in seen_hashes:
                     continue
                 seen_hashes.add(tx['hash'])
+            
                 if display_count >= 10:
                     print(f"{c['y']}...and more{c['r']}")
                     break
@@ -704,7 +850,6 @@ async def expl(wallet_obj=None):
                 print(f"    {c['c']}Claimable:{c['r']} {c['g']}{len(pending)} transfers{c['r']}")
             print("-" * 40)
 
-
 def menu(active_wallet_name):
     cls()
     print(f"\n--- {c['B']}Commands{c['r']} ---\n")
@@ -725,24 +870,21 @@ def menu(active_wallet_name):
     return cmd_input.strip().lower()
 
 async def scr():
-    await expl(current_selection) # Display explorer
-    
-    print(f"\n{c['g']}Ready.{c['r']}")
-    await awaitkey() # Wait for user input
-    
-    return ""
-
-# --- Single Wallet UI Functions ---
+    pass
 
 async def tx_ui(wallet_obj):
     try:
         cls()
         print(f"\n--- {c['B']}Send Transaction ({wallet_obj.name}){c['r']} ---\n")
 
-        to_input = await ainp(0, 0, f"{c['y']}To address: (or [esc] to cancel): {c['r']}")
-        to = to_input.strip()
+        to = await get_recipient_address_from_user(
+            allow_random_from_file=True, 
+            prompt_text="To address:"
+        )
+        to = to.strip()
         if not to or to.lower() == 'esc':
             return
+
         if not b58.match(to):
             print(f"{c['R']}{c['B']}Invalid address!{c['r']}")
             await awaitkey()
@@ -783,7 +925,7 @@ async def tx_ui(wallet_obj):
                 break
         
         while True:
-            min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
             try:
                 min_delay = float(min_delay_input.strip())
                 if min_delay < 0: raise ValueError
@@ -841,7 +983,7 @@ async def tx_ui(wallet_obj):
         fail_count_loop = 0
         current_nonce_loop = n + 1
 
-        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry): {c['r']}", end='', flush=True)
+        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
         retries_input = await ainp(0,0, '')
         try:
             num_retries = int(retries_input.strip())
@@ -860,7 +1002,7 @@ async def tx_ui(wallet_obj):
             spin_task_tx.cancel()
             try: await spin_task_tx
             except asyncio.CancelledError: pass
-            print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
+            print(f"\r{' ' * (len(f'Attempt {i+1}/{num_times}: Sending... (Nonce: {current_nonce_loop})') + 3)}", end='', flush=True)
 
             if ok:
                 success_count_loop += 1
@@ -869,7 +1011,7 @@ async def tx_ui(wallet_obj):
                 if r and 'pool_info' in r:
                     print(f"  {c['y']}Pool: {r['pool_info'].get('total_pool_size', 0)} txs pending{c['r']}")
                 print(f"  {c['c']}Explorer: {OCTRASCAN_TX_URL}{hs}{c['r']}\n")
-                
+            
                 wallet_obj.history.append({
                     'time': datetime.now(),
                     'hash': hs,
@@ -900,47 +1042,22 @@ async def tx_ui(wallet_obj):
         traceback.print_exc()
         await awaitkey()
 
-
 async def multi_ui(wallet_obj):
     try:
         cls()
-        print(f"\n--- {c['B']}Multi Send from File ({wallet_obj.name}){c['r']} ---\n")
+        print(f"\n--- {c['B']}Multi Send to Randomly Ordered Recipients ({wallet_obj.name}){c['r']} ---\n")
         
-        recipients_file = "recipentaddress.txt"
-        recipients = []
-
-        print(f"{c['c']}Loading recipients from '{recipients_file}'...{c['r']}")
-        spin_task_load = asyncio.create_task(spin_animation(0, 0, ""))
-
-        if not os.path.exists(recipients_file):
-            spin_task_load.cancel()
-            try: await spin_task_load
-            except asyncio.CancelledError: pass
-            print(f"\n{c['R']}{c['B']}Error: '{recipients_file}' not found in the current directory.{c['r']}")
-            print(f"{c['y']}Please create this file and list one recipient address per line.{c['r']}")
+        recipients_shuffled_for_run = await load_and_limit_recipients_from_file(prompt_limit=True)
+        if recipients_shuffled_for_run is None:
+            await awaitkey()
+            return
+        
+        if not recipients_shuffled_for_run:
+            print(f"{c['R']}No recipients selected for this run.{c['r']}")
             await awaitkey()
             return
 
-        with open(recipients_file, 'r') as f:
-            for line in f:
-                addr_read = line.strip()
-                if b58.match(addr_read):
-                    recipients.append(addr_read)
-                elif addr_read:
-                    print(f"{c['y']}Warning: Invalid address '{addr_read[:20]}...' in file. Skipping.{c['r']}")
-                    await asyncio.sleep(0.05)
-
-        spin_task_load.cancel()
-        try: await spin_task_load
-        except asyncio.CancelledError: pass
-        print("")
-
-        if not recipients:
-            print(f"{c['R']}No valid recipient addresses found in '{recipients_file}' after filtering.{c['r']}")
-            await awaitkey()
-            return
-
-        print(f"{c['g']}Loaded {len(recipients)} valid addresses from '{recipients_file}'.{c['r']}")
+        print(f"{c['g']}Selected {len(recipients_shuffled_for_run)} unique recipients for this run.{c['r']}")
         
         amount_input = await ainp(0, 0, f"\n{c['y']}Enter amount for EACH recipient (e.g., 0.1): {c['r']}")
         amount_str = amount_input.strip()
@@ -948,19 +1065,71 @@ async def multi_ui(wallet_obj):
             print(f"{c['R']}{c['B']}Invalid amount!{c['r']}")
             await awaitkey()
             return
-        amount_per_recipient = float(amount_str)
+        a = float(amount_str)
         
+        global DAILY_MODE_ACTIVE, DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_AMOUNT_PER_RECIPIENT, DAILY_MIN_DELAY, DAILY_MAX_DELAY, DAILY_RECIPIENT_LIMIT, DAILY_MODE_TARGET_WALLET, DAILY_MODE_RETRIES
+
+        daily_choice = await ainp(0, 0, f"\n{c['B']}{c['y']}Do you want to run this Multi Send daily (every {DAILY_INTERVAL_HOURS} hours)? [y/n]: {c['r']}")
+        if daily_choice.strip().lower() == 'y':
+            DAILY_MODE_ACTIVE = True
+            DAILY_MODE_TARGET_WALLET = wallet_obj
+            
+            while True:
+                runs_input = await ainp(0, 0, f"{c['y']}How many times do you want to repeat Multi Send (1 for single run)?: {c['r']}")
+                if runs_input.strip().isdigit() and int(runs_input.strip()) > 0:
+                    DAILY_RUNS_PER_WALLET_PER_DAY = int(runs_input.strip())
+                    break
+                else:
+                    print(f"{c['R']}{c['B']}Invalid input. Please enter a positive integer.{c['r']}")
+            
+            DAILY_AMOUNT_PER_RECIPIENT = a
+            DAILY_RECIPIENT_LIMIT = len(recipients_shuffled_for_run)
+            
+            while True:
+                min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds) for daily runs?: {c['r']}")
+                try:
+                    min_delay_val = float(min_delay_input.strip())
+                    if min_delay_val < 0: raise ValueError
+                    DAILY_MIN_DELAY = min_delay_val
+                    break
+                except ValueError:
+                    print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
+            
+            while True:
+                max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between transactions (seconds) for daily runs?: {c['r']}")
+                try:
+                    max_delay_val = float(max_delay_input.strip())
+                    if max_delay_val < DAILY_MIN_DELAY: raise ValueError
+                    DAILY_MAX_DELAY = max_delay_val
+                    break
+                except ValueError:
+                    print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
+
+            print(f"{c['B']}Enter number of retries for each transaction in daily mode (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+            retries_input = await ainp(0,0, '')
+            try:
+                DAILY_MODE_RETRIES = int(retries_input.strip())
+                if DAILY_MODE_RETRIES < 0: raise ValueError
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+                DAILY_MODE_RETRIES = 0
+
+            print(f"{c['g']}Daily Multi Send configured for wallet '{wallet_obj.name}'! Script will now run in automated daily mode.{c['r']}")
+            print(f"{c['y']}To stop, press Ctrl+C.{c['r']}")
+            await awaitkey()
+            return
+        else:
+            while True:
+                times_input = await ainp(0, 0, f"\n{c['y']}How many times do you want to repeat this entire multi-send (1 for single run)?: {c['r']}")
+                times_str = times_input.strip()
+                if not times_str.isdigit() or int(times_str) <= 0:
+                    print(f"{c['R']}{c['B']}Invalid number of times. Please enter a positive integer.{c['r']}")
+                else:
+                    num_runs = int(times_str)
+                    break
+
         while True:
-            times_input = await ainp(0, 0, f"\n{c['y']}How many times do you want to repeat this entire multi-send (1 for single run)?: {c['r']}")
-            times_str = times_input.strip()
-            if not times_str.isdigit() or int(times_str) <= 0:
-                print(f"{c['R']}{c['B']}Invalid number of times. Please enter a positive integer.{c['r']}")
-            else:
-                num_runs = int(times_str)
-                break
-        
-        while True:
-            min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
             try:
                 min_delay = float(min_delay_input.strip())
                 if min_delay < 0: raise ValueError
@@ -969,7 +1138,7 @@ async def multi_ui(wallet_obj):
                 print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
         
         while True:
-            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between transactions (seconds)?: {c['r']}")
+            max_delay_input = await ainp(0, 0, f"\n{c['y']}Maximum delay between transactions (seconds)?: {c['r']}")
             try:
                 max_delay = float(max_delay_input.strip())
                 if max_delay < min_delay: raise ValueError
@@ -977,27 +1146,27 @@ async def multi_ui(wallet_obj):
             except ValueError:
                 print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
 
-        total_tx_per_run = len(recipients)
-        fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
-        total_fees_per_run = fee_per_tx * total_tx_per_run
-        total_amount_needed_per_run = (amount_per_recipient * total_tx_per_run) + total_fees_per_run
-        
-        overall_total_transactions = total_tx_per_run * num_runs
+        total_tx_per_run_base = len(recipients_shuffled_for_run)
+        fee_per_tx = 0.001 if a < 1000 else 0.003
+        total_fees_per_run = fee_per_tx * total_tx_per_run_base
+        total_amount_needed_per_run = (a * total_tx_per_run_base) + total_fees_per_run
+
+        overall_total_transactions = total_tx_per_run_base * num_runs
         overall_total_cost = total_amount_needed_per_run * num_runs
 
-        print(f"\n--- {c['B']}Summary ({wallet_obj.name}) Multi Send{c['r']} ---")
-        print(f"Sending {c['g']}{amount_per_recipient:.6f} OCT{c['r']} to each of {total_tx_per_run} addresses.")
+        print(f"\n--- {c['B']}Summary ({wallet_obj.name}) Multi Send (Random Order){c['r']} ---")
+        print(f"Sending {c['g']}{a:.6f} OCT{c['r']} to {total_tx_per_run_base} addresses in random order.")
         print(f"Repeating this process {c['c']}{num_runs}{c['r']} time(s).")
         print(f"Delay between transactions: {c['c']}{min_delay:.1f}-{max_delay:.1f} seconds{c['r']}")
         print(f"Total transactions to attempt: {c['B']}{c['y']}{overall_total_transactions}{c['r']}")
         print(f"Estimated total cost (including fees): {c['B']}{c['g']}{overall_total_cost:.6f} OCT{c['r']}\n")
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm this multi-send operation? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm this multi-send operation? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
 
-        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry): {c['r']}", end='', flush=True)
+        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
         retries_input = await ainp(0,0, '')
         try:
             num_retries = int(retries_input.strip())
@@ -1007,60 +1176,67 @@ async def multi_ui(wallet_obj):
             num_retries = 0
 
         print(f"\n--- {c['B']}Initiating Multi-Send from Wallet {wallet_obj.name}...{c['r']} ---\n")
-        
+
         overall_success_tx = 0
         overall_failed_tx = 0
+        
+        n_initial, b_initial = await st(wallet_obj)
+        current_nonce_loop = n_initial + 1
 
         for run_idx in range(num_runs):
-            print(f"{c['B']}--- Run {run_idx+1}/{num_runs} ---{c['r']}")
-            for i, recipient_addr in enumerate(recipients):
+            print(f"{c['B']}--- Run {run_idx+1}/{num_runs} (Randomizing order) ---{c['r']}")
+            recipients_current_run = recipients_shuffled_for_run[:]
+            random.shuffle(recipients_current_run)
+
+            for i, recipient_addr in enumerate(recipients_current_run):
                 if recipient_addr == wallet_obj.addr:
                     print(f"{c['y']}  Skipping: Cannot send to sender's own address ({recipient_addr[:20]}).{c['r']}")
                     overall_failed_tx += 1
                     continue
 
-                print(f"{c['c']}[{i+1}/{len(recipients)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop}){c['r']}", end='', flush=True)
-                t, _ = mk(recipient_addr, amount_per_recipient, current_nonce_loop, wallet_obj)
+                print(f"{c['c']}[{i+1}/{len(recipients_current_run)}] Sending {a:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop}){c['r']}", end='', flush=True)
+                t, _ = mk(recipient_addr, a, current_nonce_loop, wallet_obj)
                 ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
                 
-                print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
+                print(f"\r{' ' * (len(f'[{i+1}/{len(recipients_current_run)}] Sending {a:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop})') + 3)}", end='', flush=True)
 
                 if ok:
                     overall_success_tx += 1
-                    print(f"{c['g']}    SUCCESS! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
-                    print(f"    {c['c']}Explorer: {OCTRASCAN_TX_URL}{hs}{c['r']}\n")
+                    print(f"{c['g']}  ✓ Accepted! Hash: {hs}{c['r']}")
+                    print(f"  {c['w']}Time: {dt:.2f}s{c['r']}")
+                    if r and 'pool_info' in r:
+                        print(f"  {c['y']}Pool: {r['pool_info'].get('total_pool_size', 0)} txs pending{c['r']}")
+                    print(f"  {c['c']}Explorer: {OCTRASCAN_TX_URL}{hs}{c['r']}\n")
                     wallet_obj.history.append({
                         'time': datetime.now(),
                         'hash': hs,
-                        'amt': amount_per_recipient,
+                        'amt': a,
                         'to': recipient_addr,
                         'type': 'out',
                         'ok': True
                     })
                 else:
                     overall_failed_tx += 1
-                    print(f"{c['R']}    FAILED! Error: {str(hs)[:70]}{c['r']}\n")
+                    print(f"{c['R']}  ✗ Failed! Error: {str(hs)}{c['r']}\n")
                 current_nonce_loop += 1
                 
-                if i < len(recipients) - 1 or run_idx < num_runs - 1:
+                if i < len(recipients_current_run) - 1 or run_idx < num_runs - 1:
                     delay_sec = random.uniform(min_delay, max_delay)
                     print(f"{c['c']}  Delaying for {delay_sec:.1f} seconds...{c['r']}")
                     await asyncio.sleep(delay_sec)
             
+            wallet_obj.last_update_time = 0
+
         print(f"\n--- {c['B']}Multi-send Summary ({wallet_obj.name}){c['r']} ---")
         final_color = c['g'] if overall_failed_tx == 0 else c['R']
         print(f"{final_color}{c['B']}Completed multi-send: {overall_success_tx} successful, {overall_failed_tx} failed.{c['r']}")
         wallet_obj.last_update_time = 0
 
         await awaitkey()
-    except FileNotFoundError:
-        print(f"{c['R']}{c['B']}Error: File '{recipients_file}' not found.{c['r']}")
-        await awaitkey()
     except Exception as e:
         print(f"\n{c['R']}An unexpected error occurred in multi_ui: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def encrypt_balance_ui(wallet_obj):
     try:
@@ -1104,14 +1280,23 @@ async def encrypt_balance_ui(wallet_obj):
             await awaitkey()
             return
         
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Encrypt {amount:.6f} oct? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Encrypt {amount:.6f} oct? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
         
+        print(f"{c['B']}Enter number of retries for encryption (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
+
         spin_task_enc = asyncio.create_task(spin_animation(0, 0, "Encrypting balance..."))
         
-        ok, result = await encrypt_balance(amount, wallet_obj)
+        ok, result = await encrypt_balance(amount, wallet_obj, retries=num_retries)
         
         spin_task_enc.cancel()
         try: await spin_task_enc
@@ -1131,7 +1316,6 @@ async def encrypt_balance_ui(wallet_obj):
         print(f"\n{c['R']}An unexpected error occurred in encrypt_balance_ui: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def decrypt_balance_ui(wallet_obj):
     try:
@@ -1175,14 +1359,23 @@ async def decrypt_balance_ui(wallet_obj):
             await awaitkey()
             return
         
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Decrypt {amount:.6f} oct? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Decrypt {amount:.6f} oct? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
         
+        print(f"{c['B']}Enter number of retries for decryption (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
+
         spin_task_dec = asyncio.create_task(spin_animation(0, 0, "Decrypting balance..."))
         
-        ok, result = await decrypt_balance(amount, wallet_obj)
+        ok, result = await decrypt_balance(amount, wallet_obj, retries=num_retries)
         
         spin_task_dec.cancel()
         try: await spin_task_dec
@@ -1202,7 +1395,6 @@ async def decrypt_balance_ui(wallet_obj):
         print(f"\n{c['R']}An unexpected error occurred in decrypt_balance_ui: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def private_transfer_ui(wallet_obj):
     try:
@@ -1224,84 +1416,136 @@ async def private_transfer_ui(wallet_obj):
         
         print(f"Encrypted Balance: {c['g']}{enc_data['encrypted']:.6f} oct{c['r']}\n")
         
-        to_addr_input = await ainp(0, 0, f"{c['y']}Recipient address: {c['r']}")
-        to_addr = to_addr_input.strip()
-        
-        if not to_addr or not b58.match(to_addr):
-            print(f"{c['R']}Invalid address{c['r']}")
+        recipients_shuffled_for_run = await load_and_limit_recipients_from_file(prompt_limit=True)
+        if recipients_shuffled_for_run is None:
             await awaitkey()
             return
         
-        if to_addr == wallet_obj.addr:
-            print(f"{c['R']}Cannot send to yourself{c['r']}")
+        if not recipients_shuffled_for_run:
+            print(f"{c['R']}No recipients selected for this run.{c['r']}")
             await awaitkey()
             return
-        
-        spin_task_rec = asyncio.create_task(spin_animation(0, 0, "Checking recipient..."))
-        addr_info = await get_address_info(to_addr, wallet_obj.rpc)
-        spin_task_rec.cancel()
-        try: await spin_task_rec
-        except asyncio.CancelledError: pass
-        print("")
 
-        if not addr_info:
-            print(f"{c['R']}Recipient address not found on blockchain.{c['r']}")
-            await awaitkey()
-            return
+        print(f"{c['g']}Selected {len(recipients_shuffled_for_run)} unique recipients for this run.{c['r']}")
         
-        if not addr_info.get('has_public_key'):
-            print(f"{c['R']}Recipient has no public key.{c['r']}")
-            print(f"{c['y']}They need to make a transaction first to generate one.{c['r']}")
-            await awaitkey()
-            return
-        
-        print(f"Recipient public balance: {c['c']}{addr_info.get('balance', 'unknown')}{c['r']}\n")
-        
-        amount_input = await ainp(0, 0, f"{c['y']}Amount: {c['r']}")
+        amount_input = await ainp(0, 0, f"\n{c['y']}Amount for EACH private transfer: {c['r']}")
         amount_str = amount_input.strip()
         
         if not amount_str or not re.match(r"^\d+(\.\d+)?$", amount_str) or float(amount_str) <= 0:
             return
         
         amount = float(amount_str)
+        
+        while True:
+            times_input = await ainp(0, 0, f"\n{c['y']}How many times do you want to repeat this private transfer (1 for single run)?: {c['r']}")
+            times_str = times_input.strip()
+            if not times_str.isdigit() or int(times_str) <= 0:
+                print(f"{c['R']}{c['B']}Invalid number of times. Please enter a positive integer.{c['r']}")
+            else:
+                num_runs = int(times_str)
+                break
+
+        while True:
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between private transfers (seconds)?: {c['r']}")
+            try:
+                min_delay = float(min_delay_input.strip())
+                if min_delay < 0: raise ValueError
+                break
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
+
+        while True:
+            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (seconds)?: {c['r']}")
+            try:
+                max_delay = float(max_delay_input.strip())
+                if max_delay < min_delay: raise ValueError
+                break
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
+        
+        total_tx_per_run_base = len(recipients_shuffled_for_run)
+        total_amount_needed = amount * total_tx_per_run_base * num_runs
+
         if amount > enc_data['encrypted']:
-            print(f"{c['R']}Insufficient encrypted balance{c['r']}")
+            print(f"{c['R']}Insufficient encrypted balance for a single transfer (needed: {amount:.6f}, available: {enc_data['encrypted']:.6f}){c['r']}")
             await awaitkey()
             return
-        
-        print(f"\n{c['B']}Send {amount:.6f} oct privately to{c['r']}")
-        print(f"{c['y']}{to_addr}{c['r']}\n")
-        
-        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}[y]es / [n]o:{c['r']}")
+        if total_amount_needed > enc_data['encrypted']:
+            print(f"{c['R']}Insufficient encrypted balance for ALL transfers (needed: {total_amount_needed:.6f}, available: {enc_data['encrypted']:.6f}){c['r']}")
+            await awaitkey()
+            return
+
+        print(f"\n--- {c['B']}Summary ({wallet_obj.name}) Private Multi-Transfer (Random Order){c['r']} ---")
+        print(f"Sending {c['g']}{amount:.6f} OCT privately to {total_tx_per_run_base} addresses in random order.")
+        print(f"Repeating this process {c['c']}{num_runs}{c['r']} time(s).")
+        print(f"Total private transfers to attempt: {c['B']}{c['y']}{total_tx_per_run_base * num_runs}{c['r']}")
+        print(f"Estimated total amount from encrypted balance: {c['B']}{c['g']}{total_amount_needed:.6f} OCT{c['r']}\n")
+
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm this private multi-transfer operation? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         
         if confirm != 'y':
             return
         
-        spin_task_transfer = asyncio.create_task(spin_animation(0, 0, "Creating private transfer..."))
-        
-        ok, result = await create_private_transfer(to_addr, amount, wallet_obj)
-        
-        spin_task_transfer.cancel()
-        try: await spin_task_transfer
-        except asyncio.CancelledError: pass
-        print("")
-        
-        if ok:
-            print(f"{c['g']}{c['B']}✓ Private transfer submitted!{c['r']}")
-            print(f"{c['g']}Tx hash: {result.get('tx_hash', 'unknown')}{c['r']}")
-            print(f"{c['g']}Recipient can claim in next epoch{c['r']}")
-            print(f"{c['c']}Ephemeral key: {result.get('ephemeral_key', 'unknown')}{c['r']}\n")
-            wallet_obj.last_update_time = 0
-        else:
-            print(f"{c['R']}{c['B']}✗ Error: {result.get('error', 'unknown')}{c['r']}")
-        
+        print(f"{c['B']}Enter number of retries for each transfer (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
+
+        overall_success_tx = 0
+        overall_failed_tx = 0
+
+        for run_idx in range(num_runs):
+            print(f"{c['B']}--- Run {run_idx+1}/{num_runs} (Randomizing order) ---{c['r']}")
+            recipients_current_run = recipients_shuffled_for_run[:]
+            random.shuffle(recipients_current_run)
+
+            for i, recipient_addr in enumerate(recipients_current_run):
+                print(f"{c['c']}[{i+1}/{len(recipients_current_run)}] Creating private transfer of {amount:.6f} to {recipient_addr[:20]}...{c['r']}", end='', flush=True)
+
+                if recipient_addr == wallet_obj.addr:
+                    print(f"{c['y']}    Skipping: Cannot send private transfer to self.{c['r']}")
+                    overall_failed_tx += 1
+                    continue
+
+                spin_task_transfer = asyncio.create_task(spin_animation(0, 0, ""))
+                ok, result = await create_private_transfer(recipient_addr, amount, wallet_obj, retries=num_retries)
+                
+                spin_task_transfer.cancel()
+                try: await spin_task_transfer
+                except asyncio.CancelledError: pass
+                print(f"\r{' ' * (len(f'[{i+1}/{len(recipients_current_run)}] Creating private transfer of {amount:.6f} to {recipient_addr[:20]}...') + 3)}", end='', flush=True)
+
+                if ok:
+                    overall_success_tx += 1
+                    print(f"{c['g']}    ✓ Private transfer submitted!{c['r']}")
+                    print(f"    {c['g']}Tx hash: {result.get('tx_hash', 'unknown')}{c['r']}")
+                    print(f"    {c['g']}Recipient can claim in next epoch{c['r']}")
+                else:
+                    overall_failed_tx += 1
+                    print(f"{c['R']}    ✗ Private transfer failed!{c['r']}")
+                    print(f"    {c['R']}Error: {result.get('error', 'unknown')}{c['r']}")
+                
+                if i < len(recipients_current_run) - 1 or run_idx < num_runs - 1:
+                    delay_sec = random.uniform(min_delay, max_delay)
+                    print(f"{c['c']}  Delaying for {delay_sec:.1f} seconds...{c['r']}")
+                    await asyncio.sleep(delay_sec)
+
+        wallet_obj.last_update_time = 0
+        print(f"\n--- {c['B']}Private Multi-Transfer Summary ({wallet_obj.name}){c['r']} ---")
+        final_color = c['g'] if overall_failed_tx == 0 else c['R']
+        print(f"{final_color}{c['B']}Completed: {overall_success_tx} successful, {overall_failed_tx} failed.{c['r']}")
+
         await awaitkey()
+
     except Exception as e:
         print(f"\n{c['R']}An unexpected error occurred in private_transfer_ui: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def claim_transfers_ui(wallet_obj):
     try:
@@ -1355,6 +1599,15 @@ async def claim_transfers_ui(wallet_obj):
         if not choice or choice == '0':
             return
         
+        print(f"{c['B']}Enter number of retries for claiming (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
+
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(transfers):
@@ -1364,7 +1617,7 @@ async def claim_transfers_ui(wallet_obj):
                 print(f"{c['c']}Claiming transfer #{transfer_id}...{c['r']}")
                 spin_task_claim = asyncio.create_task(spin_animation(0, 0, ""))
                 
-                ok, result = await claim_private_transfer(transfer_id, wallet_obj)
+                ok, result = await claim_private_transfer(transfer_id, wallet_obj, retries=num_retries)
                 
                 spin_task_claim.cancel()
                 try: await spin_task_claim
@@ -1391,7 +1644,6 @@ async def claim_transfers_ui(wallet_obj):
         print(f"\n{c['R']}An unexpected error occurred in claim_transfers_ui: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def exp_ui(wallet_obj):
     try:
@@ -1426,7 +1678,7 @@ async def exp_ui(wallet_obj):
             print(f"{c['g']}Public Key:{c['r']}")
             print(f"{c['g']}{wallet_obj.pub}{c['r']}")
             await awaitkey()
-            
+        
         elif choice == '2':
             fn = f"octra_wallet_export_{wallet_obj.name}_{int(time.time())}.json"
             wallet_data = {
@@ -1462,26 +1714,32 @@ async def exp_ui(wallet_obj):
         traceback.print_exc()
         await awaitkey()
 
-# --- All Wallets Transactional Functions (Concurrent Execution) ---
-async def _run_daily_multi_send_for_wallet(wallet_obj, recipients, amount_per_recipient, num_runs_per_wallet, min_delay, max_delay, results_queue_daily):
+async def _run_daily_multi_send_for_wallet(wallet_obj, recipients_for_daily_run, amount_per_recipient, num_runs_per_wallet, min_delay, max_delay, results_queue_daily, num_retries=0):
     wallet_daily_success = 0
     wallet_daily_failed = 0
     try:
         print(f"\n{c['B']}  Starting Daily Run for Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
-        
-        n, b = await st(wallet_obj)
+
+        n, b = None, None
+        for attempt in range(3):
+            n, b = await st(wallet_obj)
+            if n is not None and b is not None:
+                break
+            print(f"{c['y']}    Attempt {attempt+1}/3: Failed to get balance/nonce for {wallet_obj.name}. Retrying...{c['r']}")
+            await asyncio.sleep(2)
+
         if n is None or b is None:
-            print(f"{c['R']}    Failed to get balance/nonce. Skipping wallet for this daily run.{c['r']}\n")
-            await results_queue_daily.put(('fail_setup', wallet_obj.name, num_runs_per_wallet * len(recipients)))
+            print(f"{c['R']}    Failed to get balance/nonce after multiple attempts. Skipping wallet for this daily run.{c['r']}\n")
+            await results_queue_daily.put(('fail_setup', wallet_obj.name, num_runs_per_wallet * len(recipients_for_daily_run)))
             return
-        
+
         fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
-        total_fees_per_run_wallet = fee_per_tx * len(recipients)
-        total_amount_needed_per_run_wallet = (amount_per_recipient * len(recipients)) + total_fees_per_run_wallet
-        
+        total_fees_per_run_wallet = fee_per_tx * len(recipients_for_daily_run)
+        total_amount_needed_per_run_wallet = (amount_per_recipient * len(recipients_for_daily_run)) + total_fees_per_run_wallet
+
         if b < (total_amount_needed_per_run_wallet * num_runs_per_wallet):
             print(f"{c['R']}    Insufficient balance ({b:.6f}) for {num_runs_per_wallet} daily runs. Skipping wallet.{c['r']}\n")
-            await results_queue_daily.put(('fail_balance', wallet_obj.name, num_runs_per_wallet * len(recipients)))
+            await results_queue_daily.put(('fail_balance', wallet_obj.name, num_runs_per_wallet * len(recipients_for_daily_run)))
             return
 
         print(f"    {c['c']}Current Balance:{c['r']} {c['g']}{b:.6f} oct{c['r']}")
@@ -1489,23 +1747,25 @@ async def _run_daily_multi_send_for_wallet(wallet_obj, recipients, amount_per_re
         current_nonce = n + 1
 
         for daily_run_idx in range(num_runs_per_wallet):
-            print(f"    {c['B']}--- Daily Sub-Run {daily_run_idx+1}/{num_runs_per_wallet} for {wallet_obj.name} ---{c['r']}")
-            for i_recip, recipient_addr in enumerate(recipients):
+            print(f"    {c['B']}--- Daily Sub-Run {daily_run_idx+1}/{num_runs_per_wallet} for {wallet_obj.name} (Randomizing order) ---{c['r']}")
+            recipients_shuffled = recipients_for_daily_run[:]
+            random.shuffle(recipients_shuffled)
+
+            for i_recip, recipient_addr in enumerate(recipients_shuffled):
                 if recipient_addr == wallet_obj.addr:
                     print(f"{c['y']}    Skipping: Cannot send to sender's own address ({recipient_addr[:20]}).{c['r']}")
                     wallet_daily_failed += 1
                     continue
-                
-                print(f"{c['c']}    [{i_recip+1}/{len(recipients)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce}){c['r']}", end='', flush=True)
+
+                print(f"{c['c']}    [{i_recip+1}/{len(recipients_shuffled)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce}){c['r']}", end='', flush=True)
                 t, _ = mk(recipient_addr, amount_per_recipient, current_nonce, wallet_obj)
-                
-                ok, hs, dt, r = await snd(t, wallet_obj, retries=3) # Default 3 retries for daily mode
-                
-                print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
+                ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
+
+                print(f"\r{' ' * (len(f'    [{i_recip+1}/{len(recipients_shuffled)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce})') + 3)}", end='', flush=True)
 
                 if ok:
                     wallet_daily_success += 1
-                    print(f"{c['g']}      ✓ SUCCESS! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
+                    print(f"{c['g']}      ✓ Accepted! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
                     wallet_obj.history.append({
                         'time': datetime.now(),
                         'hash': hs,
@@ -1516,14 +1776,14 @@ async def _run_daily_multi_send_for_wallet(wallet_obj, recipients, amount_per_re
                     })
                 else:
                     wallet_daily_failed += 1
-                    print(f"{c['R']}      ✗ FAILED! Error: {str(hs)[:70]}{c['r']}")
+                    print(f"{c['R']}      ✗ Failed! Error: {str(hs)[:70]}{c['r']}")
                 current_nonce += 1
-                
-                if i_recip < len(recipients) - 1 or daily_run_idx < num_runs_per_wallet - 1:
+
+                if i_recip < len(recipients_shuffled) - 1 or daily_run_idx < num_runs_per_wallet - 1:
                     delay_sec = random.uniform(min_delay, max_delay)
                     print(f"{c['c']}      Delaying for {delay_sec:.1f} seconds...{c['r']}")
                     await asyncio.sleep(delay_sec)
-            
+
             wallet_obj.last_update_time = 0
 
         print(f"\n{c['c']}    Wallet Daily Summary: {wallet_daily_success} success, {wallet_daily_failed} failed.{c['r']}\n")
@@ -1531,7 +1791,221 @@ async def _run_daily_multi_send_for_wallet(wallet_obj, recipients, amount_per_re
 
     except Exception as wallet_daily_e:
         print(f"{c['R']}  Wallet '{wallet_obj.name}' daily run failed due to error: {wallet_daily_e}{c['r']}\n")
-        await results_queue_daily.put(('fail_exception', wallet_obj.name, num_runs_per_wallet * len(recipients)))
+        await results_queue_daily.put(('fail_exception', wallet_obj.name, num_runs_per_wallet * len(recipients_for_daily_run)))
+
+async def _run_daily_multi_send_single_wallet(wallet_obj, recipients_for_daily_run, amount_per_recipient, num_runs_per_wallet, min_delay, max_delay, num_retries=0):
+    wallet_daily_success = 0
+    wallet_daily_failed = 0
+    try:
+        print(f"\n{c['B']}  Starting Daily Run for SELECTED Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
+
+        n, b = None, None
+        for attempt in range(3):
+            n, b = await st(wallet_obj)
+            if n is not None and b is not None:
+                break
+            print(f"{c['y']}    Attempt {attempt+1}/3: Failed to get balance/nonce. Retrying...{c['r']}")
+            await asyncio.sleep(2)
+
+        if n is None or b is None:
+            print(f"{c['R']}    Failed to get balance/nonce after multiple attempts. Skipping this daily run.{c['r']}\n")
+            return (0, num_runs_per_wallet * len(recipients_for_daily_run))
+        
+        fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
+        total_fees_per_run_wallet = fee_per_tx * len(recipients_for_daily_run)
+        total_amount_needed_per_run_wallet = (amount_per_recipient * len(recipients_for_daily_run)) + total_fees_per_run_wallet
+
+        if b < (total_amount_needed_per_run_wallet * num_runs_per_wallet):
+            print(f"{c['R']}    Insufficient balance ({b:.6f}) for {num_runs_per_wallet} daily runs. Skipping.{c['r']}\n")
+            return (0, num_runs_per_wallet * len(recipients_for_daily_run))
+
+        print(f"    {c['c']}Current Balance:{c['r']} {c['g']}{b:.6f} oct{c['r']}")
+        
+        current_nonce = n + 1
+
+        for daily_run_idx in range(num_runs_per_wallet):
+            print(f"    {c['B']}--- Daily Sub-Run {daily_run_idx+1}/{num_runs_per_wallet} for {wallet_obj.name} (Randomizing order) ---{c['r']}")
+            recipients_shuffled = recipients_for_daily_run[:]
+            random.shuffle(recipients_shuffled)
+
+            for i_recip, recipient_addr in enumerate(recipients_shuffled):
+                if recipient_addr == wallet_obj.addr:
+                    print(f"{c['y']}    Skipping: Cannot send to sender's own address ({recipient_addr[:20]}).{c['r']}")
+                    wallet_daily_failed += 1
+                    continue
+
+                print(f"{c['c']}    [{i_recip+1}/{len(recipients_shuffled)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce}){c['r']}", end='', flush=True)
+                t, _ = mk(recipient_addr, amount_per_recipient, current_nonce, wallet_obj)
+                ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
+
+                print(f"\r{' ' * (len(f'    [{i_recip+1}/{len(recipients_shuffled)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce})') + 3)}", end='', flush=True)
+
+                if ok:
+                    wallet_daily_success += 1
+                    print(f"{c['g']}      ✓ Accepted! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
+                    wallet_obj.history.append({
+                        'time': datetime.now(),
+                        'hash': hs,
+                        'amt': DAILY_AMOUNT_PER_RECIPIENT,
+                        'to': recipient_addr,
+                        'type': 'out',
+                        'ok': True
+                    })
+                else:
+                    wallet_daily_failed += 1
+                    print(f"{c['R']}      ✗ Failed! Error: {str(hs)[:70]}{c['r']}")
+                current_nonce += 1
+
+                if i_recip < len(recipients_shuffled) - 1 or daily_run_idx < num_runs_per_wallet - 1:
+                    delay_sec = random.uniform(min_delay, max_delay)
+                    print(f"{c['c']}      Delaying for {delay_sec:.1f} seconds...{c['r']}")
+                    await asyncio.sleep(delay_sec)
+
+            wallet_obj.last_update_time = 0
+
+        print(f"\n{c['c']}    Wallet Daily Summary: {wallet_daily_success} success, {wallet_daily_failed} failed.{c['r']}\n")
+        return (wallet_daily_success, wallet_daily_failed)
+
+    except Exception as e:
+        print(f"{c['R']}  Wallet '{wallet_obj.name}' daily run failed due to error: {e}{c['r']}\n")
+        traceback.print_exc()
+        return (0, num_runs_per_wallet * len(recipients_for_daily_run))
+
+async def _run_single_wallet_multi_send_concurrent(wallet_obj, recipients_shuffled_for_run, amount_per_recipient, num_runs, min_delay, max_delay, num_retries, results_queue):
+    wallet_success_count = 0
+    wallet_fail_count = 0
+    try:
+        print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
+
+        n, b = await st(wallet_obj)
+        if n is None:
+            print(f"{c['R']}{c['B']}    Failed to get nonce! Skipping wallet.{c['r']}\n")
+            await results_queue.put(('fail_nonce', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
+            return
+
+        fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
+        total_amount_needed_per_run = (amount_per_recipient * len(recipients_shuffled_for_run)) + (fee_per_tx * len(recipients_shuffled_for_run))
+        total_required_for_this_wallet = total_amount_needed_per_run * num_runs
+
+        if b is None or b < total_required_for_this_wallet:
+            print(f"{c['R']}{c['B']}    Insufficient balance ({b:.6f} < {total_required_for_this_wallet:.6f})! Skipping wallet.{c['r']}\n")
+            await results_queue.put(('fail_balance', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
+            return
+
+        print(f"    {c['c']}Current Balance:{c['r']} {c['g']}{b:.6f} oct{c['r']}")
+        print(f"    {c['c']}Next Nonce:{c['r']}   {c['y']}{n + 1}{c['r']}")
+        print(f"    {c['c']}Attempting {len(recipients_shuffled_for_run)} transactions, {num_runs} times from this wallet...{c['r']}")
+
+        current_nonce_loop = n + 1
+
+        for run_idx in range(num_runs):
+            print(f"    {c['B']}--- Run {run_idx+1}/{num_runs} for {wallet_obj.name} (Randomizing order) ---{c['r']}")
+            recipients_current_run = recipients_shuffled_for_run[:]
+            random.shuffle(recipients_current_run)
+
+            for i_recip, recipient_addr in enumerate(recipients_current_run):
+                if recipient_addr == wallet_obj.addr:
+                    print(f"{c['y']}    Skipping: Cannot send to sender's own address ({recipient_addr[:20]}).{c['r']}")
+                    wallet_fail_count += 1
+                    continue
+
+                print(f"{c['c']}    [{i_recip+1}/{len(recipients_current_run)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop}){c['r']}", end='', flush=True)
+                t, _ = mk(recipient_addr, amount_per_recipient, current_nonce_loop, wallet_obj)
+                ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
+
+                print(f"\r{' ' * (len(f'    [{i_recip+1}/{len(recipients_current_run)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop})') + 3)}", end='', flush=True)
+
+                if ok:
+                    wallet_success_count += 1
+                    print(f"{c['g']}      ✓ Accepted! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
+                    wallet_obj.history.append({
+                        'time': datetime.now(),
+                        'hash': hs,
+                        'amt': amount_per_recipient,
+                        'to': recipient_addr,
+                        'type': 'out',
+                        'ok': True
+                    })
+                else:
+                    wallet_fail_count += 1
+                    print(f"{c['R']}      ✗ Failed! Error: {str(hs)[:70]}{c['r']}")
+                current_nonce_loop += 1
+
+                if i_recip < len(recipients_current_run) - 1 or run_idx < num_runs - 1:
+                    delay_sec = random.uniform(min_delay, max_delay)
+                    print(f"{c['c']}      Delaying for {delay_sec:.1f} seconds...{c['r']}")
+                    await asyncio.sleep(delay_sec)
+
+            print(f"\n{c['c']}    Run Summary for {wallet_obj.name}: {wallet_success_count} success, {wallet_fail_count} failed.{c['r']}\n")
+            await results_queue.put(('done', wallet_obj.name, wallet_success_count, wallet_fail_count))
+
+    except Exception as wallet_e:
+        print(f"{c['R']}    Wallet '{wallet_obj.name}' multi-send failed due to error: {wallet_e}{c['r']}\n")
+        await results_queue.put(('fail_exception', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
+
+async def _run_single_wallet_private_transfer_concurrent(wallet_obj, recipients_shuffled_for_run, amount_per_wallet, num_runs, min_delay, max_delay, num_retries, results_queue):
+    wallet_success_count = 0
+    wallet_fail_count = 0
+    try:
+        print(f"\n{c['B']}  Starting Private Transfer for Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
+
+        enc_data = await get_encrypted_balance(wallet_obj, retries=num_retries)
+        if not enc_data or enc_data['encrypted_raw'] == 0:
+            print(f"{c['R']}{c['B']}    No encrypted balance available or cannot get info. Skipping wallet.{c['r']}\n")
+            await results_queue.put(('fail_info', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
+            return
+
+        total_amount_needed_for_this_wallet = amount_per_wallet * num_runs * len(recipients_shuffled_for_run)
+        if total_amount_needed_for_this_wallet > enc_data['encrypted']:
+            print(f"{c['R']}{c['B']}    Insufficient encrypted balance ({enc_data['encrypted']:.6f}) for all transfers ({total_amount_needed_for_this_wallet:.6f})! Skipping wallet.{c['r']}\n")
+            await results_queue.put(('fail_balance', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
+            return
+
+        print(f"    {c['c']}Encrypted Balance:{c['r']} {c['g']}{enc_data['encrypted']:.6f} oct{c['r']}")
+        print(f"    {c['c']}Attempting {num_runs * len(recipients_shuffled_for_run)} private transfers from this wallet...{c['r']}")
+
+        for run_idx in range(num_runs):
+            print(f"    {c['B']}--- Run {run_idx+1}/{num_runs} for {wallet_obj.name} (Randomizing order) ---{c['r']}")
+            recipients_current_run = recipients_shuffled_for_run[:]
+            random.shuffle(recipients_current_run)
+
+            for i_recip, recipient_addr in enumerate(recipients_current_run):
+                if recipient_addr == wallet_obj.addr:
+                    print(f"{c['y']}    Skipping: Cannot send private transfer to self.{c['r']}")
+                    wallet_fail_count += 1
+                    continue
+
+                print(f"{c['c']}    [{i_recip+1}/{len(recipients_current_run)}] Creating private transfer of {amount_per_wallet:.6f} to {recipient_addr[:20]}...{c['r']}", end='', flush=True)
+
+                spin_task_transfer = asyncio.create_task(spin_animation(0, 0, ""))
+                private_transfer_ok, private_transfer_result = await create_private_transfer(recipient_addr, amount_per_wallet, wallet_obj, retries=num_retries)
+                spin_task_transfer.cancel()
+                try: await spin_task_transfer
+                except asyncio.CancelledError: pass
+                print(f"\r{' ' * (len(f'    [{i_recip+1}/{len(recipients_current_run)}] Creating private transfer of {amount_per_wallet:.6f} to {recipient_addr[:20]}...') + 3)}", end='', flush=True)
+
+                if private_transfer_ok:
+                    wallet_success_count += 1
+                    print(f"{c['g']}      ✓ Private transfer submitted!{c['r']}")
+                    print(f"      {c['g']}Tx hash: {private_transfer_result.get('tx_hash', 'unknown')}{c['r']}")
+                    print(f"      {c['g']}Recipient can claim in next epoch{c['r']}")
+                else:
+                    wallet_fail_count += 1
+                    print(f"{c['R']}      ✗ Private transfer failed!{c['r']}")
+                    print(f"      {c['R']}Error: {private_transfer_result.get('error', 'unknown')}{c['r']}")
+
+                if i_recip < len(recipients_current_run) - 1 or run_idx < num_runs - 1:
+                    delay_sec = random.uniform(min_delay, max_delay)
+                    print(f"{c['c']}      Delaying for {delay_sec:.1f} seconds...{c['r']}")
+                    await asyncio.sleep(delay_sec)
+
+        wallet_obj.last_update_time = 0
+        print(f"\n{c['c']}    Wallet Private Transfer Summary: {wallet_success_count} success, {wallet_fail_count} failed.{c['r']}\n")
+        await results_queue.put(('done', wallet_obj.name, wallet_success_count, wallet_fail_count))
+
+    except Exception as wallet_e:
+        print(f"{c['R']}  Wallet '{wallet_obj.name}' private transfer failed due to error: {wallet_e}{c['r']}\n")
+        await results_queue.put(('fail_exception', wallet_obj.name, num_runs * len(recipients_shuffled_for_run)))
 
 async def send_transaction_all_wallets():
     try:
@@ -1539,10 +2013,14 @@ async def send_transaction_all_wallets():
         print(f"\n--- {c['B']}Send Transaction (All Wallets){c['r']} ---\n")
         print(f"{c['R']}WARNING: This will attempt to send from ALL loaded wallets!{c['r']}\n")
 
-        to_input = await ainp(0, 0, f"{c['y']}Enter RECIPIENT address for ALL transactions (or [esc] to cancel): {c['r']}")
-        to_addr = to_input.strip()
+        to_addr = await get_recipient_address_from_user(
+            allow_random_from_file=True,
+            prompt_text="Enter RECIPIENT address for ALL transactions:"
+        )
+        to_addr = to_addr.strip()
         if not to_addr or to_addr.lower() == 'esc':
             return
+
         if not b58.match(to_addr):
             print(f"{c['R']}{c['B']}Invalid recipient address!{c['r']}")
             await awaitkey()
@@ -1574,7 +2052,7 @@ async def send_transaction_all_wallets():
                 break
         
         while True:
-            min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
             try:
                 min_delay = float(min_delay_input.strip())
                 if min_delay < 0: raise ValueError
@@ -1601,12 +2079,12 @@ async def send_transaction_all_wallets():
         total_tx_attempted_overall = len(wallets_available) * num_times_per_wallet
         print(f"Total transactions attempted overall: {c['B']}{c['y']}{total_tx_attempted_overall}{c['r']}")
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm sending {num_times_per_wallet} times from EACH wallet to {to_addr}? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm sending {num_times_per_wallet} times from EACH wallet to {to_addr}? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
 
-        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry): {c['r']}", end='', flush=True)
+        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
         retries_input = await ainp(0,0, '')
         try:
             num_retries = int(retries_input.strip())
@@ -1657,8 +2135,8 @@ async def send_transaction_all_wallets():
                     
                     t, _ = mk(to_addr, a_per_wallet, current_nonce_loop, wallet_obj, msg)
                     ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
-                    
-                    print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
+
+                    print(f"\r{' ' * (len(f'    [{j+1}/{num_times_per_wallet}] Sending {a_per_wallet:.6f} oct (Nonce: {current_nonce_loop})') + 3)}", end='', flush=True)
 
                     if ok:
                         wallet_success_count += 1
@@ -1680,7 +2158,7 @@ async def send_transaction_all_wallets():
                     else:
                         wallet_fail_count += 1
                         print(f"{c['R']}      ✗ Failed! Error: {str(hs)}{c['r']}\n")
-                    
+            
                     current_nonce_loop += 1
                     if j < num_times_per_wallet - 1:
                         delay_sec = random.uniform(min_delay, max_delay)
@@ -1688,7 +2166,6 @@ async def send_transaction_all_wallets():
                         await asyncio.sleep(delay_sec)
                 
                 print(f"\n{c['c']}  Wallet Summary: {wallet_success_count} success, {wallet_fail_count} failed.{c['r']}\n")
-                wallet_obj.last_update_time = 0
                 await results_queue.put(('done', wallet_obj.name, wallet_success_count, wallet_fail_count))
 
             except Exception as wallet_e:
@@ -1719,48 +2196,23 @@ async def send_transaction_all_wallets():
         traceback.print_exc()
         await awaitkey()
 
-
 async def multi_send_all_wallets():
     try:
         cls()
-        print(f"\n--- {c['B']}Multi Send from File (All Wallets){c['r']} ---\n")
-        print(f"{c['R']}WARNING: This will attempt to send from EACH loaded wallet to ALL recipients in the file!{c['r']}\n")
+        print(f"\n--- {c['B']}Multi Send to Randomly Ordered Recipients (All Wallets){c['r']} ---\n")
+        print(f"{c['R']}WARNING: This will attempt to send from EACH loaded wallet to ALL recipients in a random order!{c['r']}\n")
 
-        recipients_file = "recipentaddress.txt"
-        recipients = []
-
-        print(f"{c['c']}Loading recipients from '{recipients_file}'...{c['r']}")
-        spin_task_load = asyncio.create_task(spin_animation(0, 0, ""))
-
-        if not os.path.exists(recipients_file):
-            spin_task_load.cancel()
-            try: await spin_task_load
-            except asyncio.CancelledError: pass
-            print(f"\n{c['R']}{c['B']}Error: '{recipients_file}' not found in the current directory.{c['r']}")
-            print(f"{c['y']}Please create this file and list one recipient address per line.{c['r']}")
+        recipients_shuffled_for_run = await load_and_limit_recipients_from_file(prompt_limit=True)
+        if recipients_shuffled_for_run is None:
+            await awaitkey()
+            return
+        
+        if not recipients_shuffled_for_run:
+            print(f"{c['R']}No recipients selected for this run.{c['r']}")
             await awaitkey()
             return
 
-        with open(recipients_file, 'r') as f:
-            for line in f:
-                addr_read = line.strip()
-                if b58.match(addr_read):
-                    recipients.append(addr_read)
-                elif addr_read:
-                    print(f"{c['y']}Warning: Invalid address '{addr_read[:20]}...' in file. Skipping.{c['r']}")
-                    await asyncio.sleep(0.05)
-
-        spin_task_load.cancel()
-        try: await spin_task_load
-        except asyncio.CancelledError: pass
-        print("")
-
-        if not recipients:
-            print(f"{c['R']}No valid recipient addresses found in '{recipients_file}' after filtering.{c['r']}")
-            await awaitkey()
-            return
-
-        print(f"{c['g']}Loaded {len(recipients)} valid addresses from '{recipients_file}'.{c['r']}")
+        print(f"{c['g']}Selected {len(recipients_shuffled_for_run)} unique recipients for this run.{c['r']}")
         
         amount_input = await ainp(0, 0, f"\n{c['y']}Enter amount for EACH recipient (e.g., 0.1): {c['r']}")
         amount_str = amount_input.strip()
@@ -1768,24 +2220,26 @@ async def multi_send_all_wallets():
             print(f"{c['R']}{c['B']}Invalid amount!{c['r']}")
             await awaitkey()
             return
-        amount_per_recipient = float(amount_str)
+        a = float(amount_str)
         
-        global DAILY_MODE_ACTIVE, DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_AMOUNT_PER_RECIPIENT, DAILY_MIN_DELAY, DAILY_MAX_DELAY
+        global DAILY_MODE_ACTIVE, DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_AMOUNT_PER_RECIPIENT, DAILY_MIN_DELAY, DAILY_MAX_DELAY, DAILY_RECIPIENT_LIMIT, DAILY_MODE_TARGET_WALLET, DAILY_MODE_RETRIES
         
         daily_choice = await ainp(0, 0, f"\n{c['B']}{c['y']}Do you want to run this Multi Send daily (every {DAILY_INTERVAL_HOURS} hours)? [y/n]: {c['r']}")
         if daily_choice.strip().lower() == 'y':
             DAILY_MODE_ACTIVE = True
+            DAILY_MODE_TARGET_WALLET = None
             
             while True:
-                runs_input = await ainp(0, 0, f"{c['y']}How many times to run Multi Send PER DAY for EACH wallet?: {c['r']}")
+                runs_input = await ainp(0, 0, f"{c['y']}How many times do you want to repeat Multi Send (1 for single run) PER DAY for EACH wallet?: {c['r']}")
                 if runs_input.strip().isdigit() and int(runs_input.strip()) > 0:
                     DAILY_RUNS_PER_WALLET_PER_DAY = int(runs_input.strip())
                     break
                 else:
                     print(f"{c['R']}{c['B']}Invalid input. Please enter a positive integer.{c['r']}")
             
-            DAILY_AMOUNT_PER_RECIPIENT = amount_per_recipient
-
+            DAILY_AMOUNT_PER_RECIPIENT = a
+            DAILY_RECIPIENT_LIMIT = len(recipients_shuffled_for_run)
+            
             while True:
                 min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds) for daily runs?: {c['r']}")
                 try:
@@ -1805,7 +2259,16 @@ async def multi_send_all_wallets():
                     break
                 except ValueError:
                     print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
-            
+
+            print(f"{c['B']}Enter number of retries for each transaction in daily mode (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+            retries_input = await ainp(0,0, '')
+            try:
+                DAILY_MODE_RETRIES = int(retries_input.strip())
+                if DAILY_MODE_RETRIES < 0: raise ValueError
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+                DAILY_MODE_RETRIES = 0
+
             print(f"{c['g']}Daily Multi Send configured! Script will now run in automated daily mode.{c['r']}")
             print(f"{c['y']}To stop, press Ctrl+C.{c['r']}")
             await awaitkey()
@@ -1821,7 +2284,7 @@ async def multi_send_all_wallets():
                     break
 
         while True:
-            min_delay_input = await ainp(0, 0, f"{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between transactions (seconds)?: {c['r']}")
             try:
                 min_delay = float(min_delay_input.strip())
                 if min_delay < 0: raise ValueError
@@ -1830,7 +2293,7 @@ async def multi_send_all_wallets():
                 print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
         
         while True:
-            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between transactions (seconds)?: {c['r']}")
+            max_delay_input = await ainp(0, 0, f"\n{c['y']}Maximum delay between transactions (seconds)?: {c['r']}")
             try:
                 max_delay = float(max_delay_input.strip())
                 if max_delay < min_delay: raise ValueError
@@ -1838,27 +2301,27 @@ async def multi_send_all_wallets():
             except ValueError:
                 print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
 
-        total_tx_per_run = len(recipients)
-        fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
-        total_fees_per_run = fee_per_tx * total_tx_per_run
-        total_amount_needed_per_run = (amount_per_recipient * total_tx_per_run) + total_fees_per_run
-        
-        overall_total_transactions = total_tx_per_run * num_runs
-        overall_total_cost = total_amount_needed_per_run * num_runs
+        total_tx_per_run_base = len(recipients_shuffled_for_run)
+        fee_per_tx = 0.001 if a < 1000 else 0.003
+        total_fees_per_run_base = fee_per_tx * total_tx_per_run_base
+        total_amount_needed_per_run_base = (a * total_tx_per_run_base) + total_fees_per_run_base
 
-        print(f"\n--- {c['B']}Summary (All Wallets Multi Send){c['r']} ---")
-        print(f"Sending {c['g']}{amount_per_recipient:.6f} OCT{c['r']} to each of {total_tx_per_run} addresses.")
+        overall_total_transactions = total_tx_per_run_base * num_runs
+        overall_total_cost = total_amount_needed_per_run_base * num_runs
+
+        print(f"\n--- {c['B']}Summary (All Wallets Multi Send Random Order){c['r']} ---")
+        print(f"Sending {c['g']}{a:.6f} OCT{c['r']} to {total_tx_per_run_base} addresses in random order from EACH wallet.")
         print(f"Repeating this process {c['c']}{num_runs}{c['r']} time(s).")
         print(f"Delay between transactions: {c['c']}{min_delay:.1f}-{max_delay:.1f} seconds{c['r']}")
-        print(f"Total transactions to attempt: {c['B']}{c['y']}{overall_total_transactions}{c['r']}")
+        print(f"Total transactions to attempt across all wallets: {c['B']}{c['y']}{overall_total_transactions}{c['r']}")
         print(f"Estimated total cost (including fees): {c['B']}{c['g']}{overall_total_cost:.6f} OCT{c['r']}\n")
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm this multi-send operation? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm this multi-send operation? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
 
-        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry): {c['r']}", end='', flush=True)
+        print(f"{c['B']}Enter number of retries for each transaction (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
         retries_input = await ainp(0,0, '')
         try:
             num_retries = int(retries_input.strip())
@@ -1872,79 +2335,9 @@ async def multi_send_all_wallets():
         tasks = []
         results_queue = asyncio.Queue()
 
-        async def _run_single_wallet_multi_send_concurrent(wallet_obj, recipients, amount_per_recipient, num_runs, min_delay, max_delay, num_retries, results_queue):
-            wallet_success_count = 0
-            wallet_fail_count = 0
-            try:
-                print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
-                
-                n, b = await st(wallet_obj)
-                if n is None:
-                    print(f"{c['R']}{c['B']}    Failed to get nonce! Skipping wallet.{c['r']}\n")
-                    await results_queue.put(('fail_nonce', wallet_obj.name, num_runs * len(recipients)))
-                    return
-                
-                fee_per_tx = 0.001 if amount_per_recipient < 1000 else 0.003
-                total_amount_needed_per_run = (amount_per_recipient * len(recipients)) + (fee_per_tx * len(recipients))
-                total_required_for_this_wallet = total_amount_needed_per_run * num_runs
-
-                if b is None or b < total_required_for_this_wallet:
-                    print(f"{c['R']}{c['B']}    Insufficient balance ({b:.6f} < {total_required_for_this_wallet:.6f})! Skipping wallet.{c['r']}\n")
-                    await results_queue.put(('fail_balance', wallet_obj.name, num_runs * len(recipients)))
-                    return
-                
-                print(f"    {c['c']}Current Balance:{c['r']} {c['g']}{b:.6f} oct{c['r']}")
-                print(f"    {c['c']}Next Nonce:{c['r']}   {c['y']}{n + 1}{c['r']}")
-                print(f"    {c['c']}Attempting {len(recipients)} transactions, {num_runs} times from this wallet...{c['r']}")
-
-                current_nonce_loop = n + 1
-
-                for run_idx in range(num_runs):
-                    print(f"    {c['B']}--- Run {run_idx+1}/{num_runs} for {wallet_obj.name} ---{c['r']}")
-                    for i_recip, recipient_addr in enumerate(recipients):
-                        if recipient_addr == wallet_obj.addr:
-                            print(f"{c['y']}    Skipping: Cannot send to sender's own address ({recipient_addr[:20]}).{c['r']}")
-                            wallet_fail_count += 1
-                            continue
-
-                        print(f"{c['c']}    [{i_recip+1}/{len(recipients)}] Sending {amount_per_recipient:.6f} to {recipient_addr[:20]}... (Nonce: {current_nonce_loop}){c['r']}", end='', flush=True)
-                        t, _ = mk(recipient_addr, amount_per_recipient, current_nonce_loop, wallet_obj)
-                        ok, hs, dt, r = await snd(t, wallet_obj, retries=num_retries)
-                        
-                        print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
-
-                        if ok:
-                            wallet_success_count += 1
-                            print(f"{c['g']}      ✓ SUCCESS! Hash: {hs[:10]}... Time: {dt:.2f}s{c['r']}")
-                            print(f"      {c['c']}Explorer: {OCTRASCAN_TX_URL}{hs}{c['r']}\n")
-                            wallet_obj.history.append({
-                                'time': datetime.now(),
-                                'hash': hs,
-                                'amt': amount_per_recipient,
-                                'to': recipient_addr,
-                                'type': 'out',
-                                'ok': True
-                            })
-                        else:
-                            wallet_fail_count += 1
-                            print(f"{c['R']}      ✗ FAILED! Error: {str(hs)[:70]}{c['r']}")
-                        current_nonce_loop += 1
-                        
-                        if i_recip < len(recipients) - 1 or run_idx < num_runs - 1:
-                            delay_sec = random.uniform(min_delay, max_delay)
-                            print(f"{c['c']}      Delaying for {delay_sec:.1f} seconds...{c['r']}")
-                            await asyncio.sleep(delay_sec)
-                    
-                print(f"\n{c['c']}    Run Summary for {wallet_obj.name}: {wallet_success_count} success, {wallet_fail_count} failed.{c['r']}\n")
-                await results_queue.put(('done', wallet_obj.name, wallet_success_count, wallet_fail_count))
-
-            except Exception as wallet_e:
-                print(f"{c['R']}    Wallet '{wallet_obj.name}' multi-send failed due to error: {wallet_e}{c['r']}\n")
-                await results_queue.put(('fail_exception', wallet_obj.name, num_runs * len(recipients)))
-
         for wallet_obj in wallets_available:
             tasks.append(_run_single_wallet_multi_send_concurrent(
-                wallet_obj, recipients, amount_per_recipient, num_runs, min_delay, max_delay, num_retries, results_queue
+                wallet_obj, recipients_shuffled_for_run, a, num_runs, min_delay, max_delay, num_retries, results_queue
             ))
 
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -1964,14 +2357,10 @@ async def multi_send_all_wallets():
         print(f"{final_color}{c['B']}Total transactions: {overall_success_tx} successful, {overall_failed_tx} failed.{c['r']}")
 
         await awaitkey()
-    except FileNotFoundError:
-        print(f"{c['R']}{c['B']}Error: File '{recipients_file}' not found.{c['r']}")
-        await awaitkey()
     except Exception as e:
         print(f"\n{c['R']}An unexpected error occurred in multi_send_all_wallets: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def encrypt_balance_all_wallets():
     try:
@@ -1979,7 +2368,7 @@ async def encrypt_balance_all_wallets():
         print(f"\n--- {c['B']}Encrypt Balance (All Wallets){c['r']} ---\n")
         print(f"{c['R']}WARNING: This will attempt to encrypt balance from ALL loaded wallets!{c['r']}\n")
 
-        amount_input = await ainp(0, 0, f"{c['y']}Enter AMOUNT to encrypt per wallet (e.g., 0.1): {c['r']}")
+        amount_input = await ainp(0, 0, f"\n{c['y']}Enter AMOUNT to encrypt per wallet (e.g., 0.1): {c['r']}")
         amount_str = amount_input.strip()
         if not re.match(r"^\d+(\.\d+)?$", amount_str) or float(amount_str) <= 0:
             print(f"{c['R']}{c['B']}Invalid amount!{c['r']}")
@@ -1987,24 +2376,33 @@ async def encrypt_balance_all_wallets():
             return
         amount_per_wallet = float(amount_str)
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm encrypting {amount_per_wallet:.6f} OCT from EACH wallet? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm encrypting {amount_per_wallet:.6f} OCT from EACH wallet? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
+
+        print(f"{c['B']}Enter number of retries for each encryption (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
 
         print(f"\n--- {c['B']}Initiating Encryption from All Wallets (Concurrent)...{c['r']} ---\n")
         
         tasks = []
         results_queue = asyncio.Queue()
 
-        async def _run_single_wallet_encrypt_concurrent(wallet_obj, amount_per_wallet, results_queue):
+        async def _run_single_wallet_encrypt_concurrent(wallet_obj, amount_per_wallet, results_queue, num_retries):
             wallet_success_count = 0
             wallet_fail_count = 0
             try:
                 print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
                 
                 _, pub_bal = await st(wallet_obj)
-                enc_data = await get_encrypted_balance(wallet_obj)
+                enc_data = await get_encrypted_balance(wallet_obj, retries=num_retries)
                 if not enc_data:
                     print(f"{c['R']}{c['B']}    Cannot get encrypted balance info. Skipping wallet.{c['r']}\n")
                     await results_queue.put(('fail_info', wallet_obj.name, 1))
@@ -2020,7 +2418,7 @@ async def encrypt_balance_all_wallets():
                 print(f"    {c['c']}Encrypted Balance:{c['r']} {c['y']}{enc_data['encrypted']:.6f} oct{c['r']}")
                 
                 spin_task_enc = asyncio.create_task(spin_animation(0, 0, "    Encrypting balance..."))
-                ok, result = await encrypt_balance(amount_per_wallet, wallet_obj)
+                ok, result = await encrypt_balance(amount_per_wallet, wallet_obj, retries=num_retries)
                 
                 spin_task_enc.cancel()
                 try: await spin_task_enc
@@ -2029,7 +2427,7 @@ async def encrypt_balance_all_wallets():
 
                 if ok:
                     wallet_success_count += 1
-                    print(f"{c['g']}{c['B']}    ✓ Encryption submitted!{c['r']}")
+                    print(f"{c['g']}{c['B']}✓ Encryption submitted!{c['r']}")
                     print(f"{c['g']}Tx hash: {result.get('tx_hash', 'unknown')}{c['r']}\n")
                     wallet_obj.last_update_time = 0
                 else:
@@ -2043,7 +2441,7 @@ async def encrypt_balance_all_wallets():
                 await results_queue.put(('fail_exception', wallet_obj.name, 1))
 
         for wallet_obj in wallets_available:
-            tasks.append(_run_single_wallet_encrypt_concurrent(wallet_obj, amount_per_wallet, results_queue))
+            tasks.append(_run_single_wallet_encrypt_concurrent(wallet_obj, amount_per_wallet, results_queue, num_retries))
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2066,14 +2464,13 @@ async def encrypt_balance_all_wallets():
         traceback.print_exc()
         await awaitkey()
 
-
 async def decrypt_balance_all_wallets():
     try:
         cls()
         print(f"\n--- {c['B']}Decrypt Balance (All Wallets){c['r']} ---\n")
         print(f"{c['R']}WARNING: This will attempt to decrypt balance from ALL loaded wallets!{c['r']}\n")
 
-        amount_input = await ainp(0, 0, f"{c['y']}Enter AMOUNT to decrypt per wallet (e.g., 0.1): {c['r']}")
+        amount_input = await ainp(0, 0, f"\n{c['y']}Enter AMOUNT to decrypt per wallet (e.g., 0.1): {c['r']}")
         amount_str = amount_input.strip()
         if not re.match(r"^\d+(\.\d+)?$", amount_str) or float(amount_str) <= 0:
             print(f"{c['R']}{c['B']}Invalid amount!{c['r']}")
@@ -2081,24 +2478,33 @@ async def decrypt_balance_all_wallets():
             return
         amount_per_wallet = float(amount_str)
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm decrypting {amount_per_wallet:.6f} OCT from EACH wallet? [y/n]: {c['r']}")
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm decrypting {amount_per_wallet:.6f} OCT from EACH wallet? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
+
+        print(f"{c['B']}Enter number of retries for each decryption (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
 
         print(f"\n--- {c['B']}Initiating Decryption from All Wallets (Concurrent)...{c['r']} ---\n")
         
         tasks = []
         results_queue = asyncio.Queue()
 
-        async def _run_single_wallet_decrypt_concurrent(wallet_obj, amount_per_wallet, results_queue):
+        async def _run_single_wallet_decrypt_concurrent(wallet_obj, amount_per_wallet, results_queue, num_retries):
             wallet_success_count = 0
             wallet_fail_count = 0
             try:
                 print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
                 
                 _, pub_bal = await st(wallet_obj)
-                enc_data = await get_encrypted_balance(wallet_obj)
+                enc_data = await get_encrypted_balance(wallet_obj, retries=num_retries)
                 if not enc_data or enc_data['encrypted_raw'] == 0:
                     print(f"{c['R']}{c['B']}    No encrypted balance available or cannot get info. Skipping wallet.{c['r']}\n")
                     await results_queue.put(('fail_info', wallet_obj.name, 1))
@@ -2114,7 +2520,7 @@ async def decrypt_balance_all_wallets():
                 print(f"    {c['c']}Encrypted Balance:{c['r']} {c['y']}{enc_data['encrypted']:.6f} oct{c['r']}")
                 
                 spin_task_dec = asyncio.create_task(spin_animation(0, 0, "    Decrypting balance..."))
-                ok, result = await decrypt_balance(amount_per_wallet, wallet_obj)
+                ok, result = await decrypt_balance(amount_per_wallet, wallet_obj, retries=num_retries)
                 
                 spin_task_dec.cancel()
                 try: await spin_task_dec
@@ -2123,7 +2529,7 @@ async def decrypt_balance_all_wallets():
 
                 if ok:
                     wallet_success_count += 1
-                    print(f"{c['g']}{c['B']}    ✓ Decryption submitted!{c['r']}")
+                    print(f"{c['g']}{c['B']}✓ Decryption submitted!{c['r']}")
                     print(f"{c['g']}Tx hash: {result.get('tx_hash', 'unknown')}{c['r']}\n")
                     wallet_obj.last_update_time = 0
                 else:
@@ -2137,7 +2543,7 @@ async def decrypt_balance_all_wallets():
                 await results_queue.put(('fail_exception', wallet_obj.name, 1))
 
         for wallet_obj in wallets_available:
-            tasks.append(_run_single_wallet_decrypt_concurrent(wallet_obj, amount_per_wallet, results_queue))
+            tasks.append(_run_single_wallet_decrypt_concurrent(wallet_obj, amount_per_wallet, results_queue, num_retries))
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2160,140 +2566,113 @@ async def decrypt_balance_all_wallets():
         traceback.print_exc()
         await awaitkey()
 
-
 async def private_transfer_all_wallets():
     try:
         cls()
         print(f"\n--- {c['B']}Private Transfer (All Wallets){c['r']} ---\n")
         print(f"{c['R']}WARNING: This will attempt to create private transfers from ALL loaded wallets!{c['r']}\n")
 
-        to_input = await ainp(0, 0, f"{c['y']}Enter RECIPIENT address for ALL private transfers (or [esc] to cancel): {c['r']}")
-        to_addr = to_input.strip()
-        if not to_addr or to_addr.lower() == 'esc':
-            return
-        if not b58.match(to_addr):
-            print(f"{c['R']}{c['B']}Invalid recipient address!{c['r']}")
+        recipients_shuffled_for_run = await load_and_limit_recipients_from_file(prompt_limit=True)
+        if recipients_shuffled_for_run is None:
             await awaitkey()
             return
-        if to_addr in [w.addr for w in wallets_available]:
-            print(f"{c['R']}{c['B']}Cannot send to yourself or another loaded wallet in this mode. Choose a non-loaded recipient.{c['r']}")
+        
+        if not recipients_shuffled_for_run:
+            print(f"{c['R']}No recipients selected for this run.{c['r']}")
             await awaitkey()
             return
 
-        amount_input = await ainp(0, 0, f"{c['y']}Enter AMOUNT per private transfer (e.g., 0.1) for EACH wallet: {c['r']}")
+        print(f"{c['g']}Selected {len(recipients_shuffled_for_run)} unique recipients for this run.{c['r']}")
+        
+        amount_input = await ainp(0, 0, f"\n{c['y']}Amount for EACH private transfer: {c['r']}")
         amount_str = amount_input.strip()
-        if not re.match(r"^\d+(\.\d+)?$", amount_str) or float(amount_str) <= 0:
-            print(f"{c['R']}{c['B']}Invalid amount!{c['r']}")
-            await awaitkey()
+        
+        if not amount_str or not re.match(r"^\d+(\.\d+)?$", amount_str) or float(amount_str) <= 0:
             return
+        
         amount_per_wallet = float(amount_str)
-
-        print(f"{c['c']}Checking recipient public key...{c['r']}")
-        spin_task_rec = asyncio.create_task(spin_animation(0, 0, ""))
-        recipient_info = await get_address_info(to_addr, wallets_available[0].rpc if wallets_available else None)
-        spin_task_rec.cancel()
-        try: await spin_task_rec
-        except asyncio.CancelledError: pass
-        print("")
-
-        if not recipient_info or not recipient_info.get('has_public_key'):
-            print(f"{c['R']}{c['B']}Recipient address not found on blockchain or has no public key.{c['r']}")
-            print(f"{c['y']}Recipient needs to make a transaction first to generate one.{c['r']}")
-            await awaitkey()
-            return
         
-        print(f"Recipient public balance: {c['c']}{recipient_info.get('balance', 'unknown')}{c['r']}\n")
+        while True:
+            times_input = await ainp(0, 0, f"\n{c['y']}How many times do you want to repeat this private transfer (1 for single run) PER WALLET?: {c['r']}")
+            times_str = times_input.strip()
+            if not times_str.isdigit() or int(times_str) <= 0:
+                print(f"{c['R']}{c['B']}Invalid number of times. Please enter a positive integer.{c['r']}")
+            else:
+                num_runs = int(times_str)
+                break
 
-        print(f"\n--- {c['B']}Summary (All Wallets Private Transfer){c['r']} ---")
-        print(f"Recipient for all: {c['g']}{to_addr}{c['r']}")
-        print(f"Amount per wallet: {c['g']}{amount_per_wallet:.6f} oct{c['r']}")
+        while True:
+            min_delay_input = await ainp(0, 0, f"\n{c['y']}Minimum delay between private transfers (seconds)?: {c['r']}")
+            try:
+                min_delay = float(min_delay_input.strip())
+                if min_delay < 0: raise ValueError
+                break
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid minimum delay. Please enter a non-negative number.{c['r']}")
+
+        while True:
+            max_delay_input = await ainp(0, 0, f"{c['y']}Maximum delay between private transfers (seconds)?: {c['r']}")
+            try:
+                max_delay = float(max_delay_input.strip())
+                if max_delay < min_delay: raise ValueError
+                break
+            except ValueError:
+                print(f"{c['R']}{c['B']}Invalid maximum delay. Must be >= minimum delay.{c['r']}")
         
-        total_tx_attempted = len(wallets_available)
-        print(f"Attempting {total_tx_attempted} private transfers from {total_tx_attempted} wallets.")
+        total_tx_per_run_base = len(recipients_shuffled_for_run)
+        overall_total_transactions = len(wallets_available) * total_tx_per_run_base * num_runs
+        overall_total_cost = amount_per_wallet * overall_total_transactions
 
-        confirm_input = await ainp(0, 0, f"\n{c['B']}{c['y']}Confirm creating {amount_per_wallet:.6f} OCT private transfer from EACH wallet? [y/n]: {c['r']}")
+        print(f"\n--- {c['B']}Summary (All Wallets Private Multi-Transfer Random Order){c['r']} ---")
+        print(f"Sending {c['g']}{amount_per_wallet:.6f} OCT privately to {total_tx_per_run_base} addresses in random order from EACH wallet.")
+        print(f"Repeating this process {c['c']}{num_runs}{c['r']} time(s).")
+        print(f"Total private transfers to attempt across all wallets: {c['B']}{c['y']}{overall_total_transactions}{c['r']}")
+        print(f"Estimated total amount from encrypted balance: {c['B']}{c['g']}{overall_total_cost:.6f} OCT{c['r']}\n")
+
+        confirm_input = await ainp(0, 0, f"{c['B']}{c['y']}Confirm this private multi-transfer operation? [y/n]: {c['r']}")
         confirm = confirm_input.strip().lower()
         if confirm != 'y':
             return
+
+        print(f"{c['B']}Enter number of retries for each transfer (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
 
         print(f"\n--- {c['B']}Initiating Private Transfers from All Wallets (Concurrent)...{c['r']} ---\n")
         
         tasks = []
         results_queue = asyncio.Queue()
 
-        async def _run_single_wallet_private_transfer_concurrent(wallet_obj, to_addr, amount_per_wallet, results_queue):
-            wallet_success_count = 0
-            wallet_fail_count = 0
-            try:
-                print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
-                
-                spin_task = asyncio.create_task(spin_animation(0, 0, "Fetching encrypted balance..."))
-                enc_data = await get_encrypted_balance(wallet_obj)
-                spin_task.cancel()
-                try: await spin_task
-                except asyncio.CancelledError: pass
-                print("")
-
-                if not enc_data or enc_data['encrypted_raw'] == 0:
-                    print(f"{c['R']}{c['B']}    No encrypted balance available or cannot get info. Skipping wallet.{c['r']}\n")
-                    await results_queue.put(('fail_info', wallet_obj.name, 1))
-                    return
-                
-                if amount_per_wallet > enc_data['encrypted']:
-                    print(f"{c['R']}{c['B']}    Insufficient encrypted balance ({enc_data['encrypted']:.6f})! Skipping wallet.{c['r']}\n")
-                    await results_queue.put(('fail_balance', wallet_obj.name, 1))
-                    return
-                
-                print(f"    {c['c']}Encrypted Balance:{c['r']} {c['g']}{enc_data['encrypted']:.6f} oct{c['r']}")
-                
-                spin_task_transfer = asyncio.create_task(spin_animation(0, 0, "    Creating private transfer..."))
-                ok, result = await create_private_transfer(to_addr, amount_per_wallet, wallet_obj)
-                
-                spin_task_transfer.cancel()
-                try: await spin_task_transfer
-                except asyncio.CancelledError: pass
-                print("")
-
-                if ok:
-                    wallet_success_count += 1
-                    print(f"{c['g']}{c['B']}    ✓ Private transfer submitted!{c['r']}")
-                    print(f"    {c['g']}Tx hash: {result.get('tx_hash', 'unknown')}{c['r']}\n")
-                    wallet_obj.last_update_time = 0
-                else:
-                    wallet_fail_count += 1
-                    print(f"{c['R']}{c['B']}    ✗ Private transfer failed!{c['r']}")
-                    print(f"    {c['R']}Error: {result.get('error', 'unknown')}{c['r']}\n")
-                
-                await results_queue.put(('done', wallet_obj.name, wallet_success_count, wallet_fail_count))
-
-            except Exception as wallet_e:
-                print(f"{c['R']}  Wallet '{wallet_obj.name}' private transfer failed due to error: {wallet_e}{c['r']}\n")
-                await results_queue.put(('fail_exception', wallet_obj.name, 1))
-
         for wallet_obj in wallets_available:
-            tasks.append(_run_single_wallet_private_transfer_concurrent(wallet_obj, to_addr, amount_per_wallet, results_queue))
+            tasks.append(_run_single_wallet_private_transfer_concurrent(
+                wallet_obj, recipients_shuffled_for_run, amount_per_wallet, num_runs, min_delay, max_delay, num_retries, results_queue
+            ))
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        success_count_overall = 0
-        fail_count_overall = 0
+        overall_success_tx = 0
+        overall_failed_tx = 0
         while not results_queue.empty():
             result_type, wallet_name, *counts = await results_queue.get()
             if result_type == 'done':
-                success_count_overall += counts[0]
-                fail_count_overall += counts[1]
+                overall_success_tx += counts[0]
+                overall_failed_tx += counts[1]
             elif result_type.startswith('fail_') or result_type == 'skip':
-                fail_count_overall += counts[0]
+                overall_failed_tx += counts[0]
 
         print(f"\n--- {c['B']}All Wallets Private Transfer Summary{c['r']} ---")
-        final_color = c['g'] if fail_count_overall == 0 else c['R']
-        print(f"{final_color}{c['B']}Total: {success_count_overall} successful, {fail_count_overall} failed.{c['r']}")
+        final_color = c['g'] if overall_failed_tx == 0 else c['R']
+        print(f"{final_color}{c['B']}Total: {overall_success_tx} successful, {overall_failed_tx} failed.{c['r']}")
         await awaitkey()
     except Exception as e:
         print(f"\n{c['R']}An unexpected error occurred in private_transfer_all_wallets: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def claim_transfers_all_wallets():
     try:
@@ -2306,6 +2685,15 @@ async def claim_transfers_all_wallets():
         if confirm != 'y':
             return
 
+        print(f"{c['B']}Enter number of retries for each claim (0 for no retry - if tx fails, it will not be re-attempted): {c['r']}", end='', flush=True)
+        retries_input = await ainp(0,0, '')
+        try:
+            num_retries = int(retries_input.strip())
+            if num_retries < 0: raise ValueError
+        except ValueError:
+            print(f"{c['R']}{c['B']}Invalid retry count. Setting to 0.{c['r']}")
+            num_retries = 0
+
         print(f"\n--- {c['B']}Initiating Claim from All Wallets (Concurrent)...{c['r']} ---\n")
         
         overall_success_wallets = 0
@@ -2314,14 +2702,14 @@ async def claim_transfers_all_wallets():
         tasks = []
         results_queue = asyncio.Queue()
 
-        async def _run_single_wallet_claim_concurrent(wallet_obj, results_queue):
+        async def _run_single_wallet_claim_concurrent(wallet_obj, results_queue, num_retries):
             wallet_success_count = 0
             wallet_fail_count = 0
             try:
                 print(f"\n{c['B']}  Starting Wallet: {wallet_obj.name} ({wallet_obj.addr[:8]}...){c['r']}")
                 
                 print(f"{c['c']}    Loading pending transfers...{c['r']}")
-                transfers = await get_pending_transfers(wallet_obj)
+                transfers = await get_pending_transfers(wallet_obj, retries=num_retries)
                 
                 if not transfers:
                     print(f"{c['y']}    No pending transfers for this wallet.{c['r']}\n")
@@ -2335,14 +2723,16 @@ async def claim_transfers_all_wallets():
                     transfer_sender = transfer['sender'][:10]
                     print(f"{c['c']}    [{j+1}/{len(transfers)}] Claiming transfer #{transfer_id} from {transfer_sender}...{c['r']}", end='', flush=True)
                     
-                    ok, result = await claim_private_transfer(transfer_id, wallet_obj)
+                    ok, result = await claim_private_transfer(transfer_id, wallet_obj, retries=num_retries)
                     
-                    print(f"\r{' ' * (sz()[0]-1)}", end='', flush=True)
+                    print(f"\r{' ' * (len(f'    [{j+1}/{len(transfers)}] Claiming transfer #{transfer_id} from {transfer_sender}...') + 3)}", end='', flush=True)
 
                     if ok:
                         wallet_success_count += 1
                         print(f"{c['g']}      ✓ Claimed {result.get('amount', 'unknown')}! (Tx Hash: {result.get('tx_hash', 'unknown')[:10]}...){c['r']}")
                         print(f"      {c['c']}Explorer: {OCTRASCAN_TX_URL}{result.get('tx_hash', 'unknown')}{c['r']}\n")
+                        print(f"{c['g']}Your encrypted balance has been updated{c['r']}")
+                        wallet_obj.last_update_time = 0
                     else:
                         wallet_fail_count += 1
                         error_msg = result.get('error', 'unknown error')
@@ -2358,7 +2748,7 @@ async def claim_transfers_all_wallets():
                 await results_queue.put(('fail_exception', wallet_obj.name, len(transfers)))
 
         for wallet_obj in wallets_available:
-            tasks.append(_run_single_wallet_claim_concurrent(wallet_obj, results_queue))
+            tasks.append(_run_single_wallet_claim_concurrent(wallet_obj, results_queue, num_retries))
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2368,7 +2758,7 @@ async def claim_transfers_all_wallets():
                 overall_success_wallets += counts[0]
                 overall_failed_wallets += counts[1]
             elif result_type.startswith('fail_') or result_type == 'skip':
-                overall_failed_wallets += (counts[0] if counts else 0) # Add total transfers that were skipped/failed setup
+                overall_failed_wallets += (counts[0] if counts else 0)
 
         print(f"\n--- {c['B']}Overall Claim Summary (All Wallets){c['r']} ---")
         final_color = c['g'] if overall_failed_wallets == 0 else c['R']
@@ -2378,7 +2768,6 @@ async def claim_transfers_all_wallets():
         print(f"\n{c['R']}An unexpected error occurred in claim_transfers_all_wallets: {e}{c['r']}")
         traceback.print_exc()
         await awaitkey()
-
 
 async def export_keys_all_wallets():
     try:
@@ -2446,11 +2835,9 @@ async def export_keys_all_wallets():
         traceback.print_exc()
         await awaitkey()
 
-# --- Wallet Loading and Selection ---
-
 async def ld_wallets():
     global wallets_available
-    proxies_list = [] # Local list for proxies during loading
+    proxies_list = []
     wallets_available.clear()
     
     wallet_file = "wallet.json"
@@ -2535,8 +2922,13 @@ async def ld_wallets():
     return bool(wallets_available)
 
 async def select_wallet():
-    global current_selection
+    global current_selection, DAILY_MODE_ACTIVE, DAILY_MODE_TARGET_WALLET
     
+    if DAILY_MODE_ACTIVE:
+        print(f"{c['R']}Cannot change wallet selection while Daily Mode is active.{c['r']}")
+        await awaitkey()
+        return
+
     if not wallets_available:
         print(f"{c['y']}No wallets available to select.{c['r']}")
         await awaitkey()
@@ -2581,15 +2973,14 @@ async def select_wallet():
 async def ensure_single_wallet_selected():
     global current_selection
     if current_selection is None:
-        print(f"\n{c['R']}This command requires a single wallet to be selected.{c['r']}")
+        print(f"{c['R']}This command requires a single wallet to be selected.{c['r']}")
         print(f"{c['y']}Please use 's' command to select a specific wallet first.{c['r']}")
         await awaitkey()
         return False, None
     return True, current_selection
 
-# --- Main Application Loop ---
 async def main():
-    global current_selection, wallets_available, DAILY_MODE_ACTIVE, DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_AMOUNT_PER_RECIPIENT, DAILY_MIN_DELAY, DAILY_MAX_DELAY
+    global current_selection, wallets_available, DAILY_MODE_ACTIVE, DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_AMOUNT_PER_RECIPIENT, DAILY_MIN_DELAY, DAILY_MAX_DELAY, DAILY_RECIPIENT_LIMIT, DAILY_MODE_TARGET_WALLET, cancel_countdown_flag, DAILY_MODE_RETRIES
     
     sys_signal.signal(sys_signal.SIGINT, signal_handler)
     sys_signal.signal(sys_signal.SIGTERM, signal_handler)
@@ -2605,10 +2996,12 @@ async def main():
     print("")
 
     if wallets_available:
-        await select_wallet()
-        
-        if current_selection is None and wallets_available:
-             pass
+        if len(wallets_available) == 1:
+            current_selection = wallets_available[0]
+            print(f"{c['g']}Auto-selected single wallet: '{current_selection.name}'{c['r']}")
+            await asyncio.sleep(1)
+        else:
+            await select_wallet()
         
         if current_selection:
             print(f"{c['c']}Refreshing initial state for {current_selection.name}...{c['r']}")
@@ -2626,64 +3019,69 @@ async def main():
     try:
         while not stop_flag.is_set():
             if DAILY_MODE_ACTIVE:
+                cls()
                 print(f"\n{c['B']}--- Starting Daily Multi Send Run ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---{c['r']}")
+                print(f"{c['y']}(Sit back & let the bot handle it 🧠){c['r']}\n")
                 
                 recipients_file = "recipentaddress.txt"
-                recipients = []
                 
-                try:
-                    if not os.path.exists(recipients_file):
-                        print(f"{c['R']}Error: '{recipients_file}' not found for daily run. Skipping this run.{c['r']}")
-                        await asyncio.sleep(5)
-                        continue
-                    
-                    with open(recipients_file, 'r') as f:
-                        for line in f:
-                            addr_read = line.strip()
-                            if b58.match(addr_read):
-                                recipients.append(addr_read)
-                    
-                    if not recipients:
-                        print(f"{c['R']}No valid recipients in '{recipients_file}' for daily run. Skipping this run.{c['r']}")
-                        await asyncio.sleep(5)
-                        continue
-
-                except Exception as e:
-                    print(f"{c['R']}Error loading recipients for daily run: {e}. Skipping this run.{c['r']}")
+                recipients_for_daily_run = await load_and_limit_recipients_from_file(file_path=recipients_file, prompt_limit=False)
+                if recipients_for_daily_run is None:
+                    print(f"{c['R']}Error loading/limiting recipients for daily run. Daily mode paused.{c['r']}")
+                    DAILY_MODE_ACTIVE = False
+                    DAILY_MODE_TARGET_WALLET = None
+                    await asyncio.sleep(5)
+                    continue
+                if not recipients_for_daily_run:
+                    print(f"{c['y']}No recipients selected for daily run. Daily mode paused.{c['r']}")
+                    DAILY_MODE_ACTIVE = False
+                    DAILY_MODE_TARGET_WALLET = None
                     await asyncio.sleep(5)
                     continue
 
                 overall_daily_success_tx = 0
                 overall_daily_failed_tx = 0
                 
-                daily_run_tasks = []
-                daily_results_queue = asyncio.Queue()
+                if DAILY_MODE_TARGET_WALLET:
+                    print(f"\n{c['B']}Running Daily Multi Send for selected wallet: {DAILY_MODE_TARGET_WALLET.name}{c['r']}")
+                    success, failed = await _run_daily_multi_send_single_wallet(
+                        DAILY_MODE_TARGET_WALLET, recipients_for_daily_run, DAILY_AMOUNT_PER_RECIPIENT,
+                        DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_MIN_DELAY, DAILY_MAX_DELAY, num_retries=DAILY_MODE_RETRIES
+                    )
+                    overall_daily_success_tx += success
+                    overall_daily_failed_tx += failed
+                else:
+                    daily_run_tasks = []
+                    daily_results_queue = asyncio.Queue()
 
-                for wallet_obj in wallets_available:
-                    daily_run_tasks.append(_run_daily_multi_send_for_wallet(
-                        wallet_obj, recipients, DAILY_AMOUNT_PER_RECIPIENT,
-                        DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_MIN_DELAY, DAILY_MAX_DELAY,
-                        daily_results_queue
-                    ))
-                
-                await asyncio.gather(*daily_run_tasks, return_exceptions=True)
+                    for wallet_obj in wallets_available:
+                        daily_run_tasks.append(_run_daily_multi_send_for_wallet(
+                            wallet_obj, recipients_for_daily_run, DAILY_AMOUNT_PER_RECIPIENT,
+                            DAILY_RUNS_PER_WALLET_PER_DAY, DAILY_MIN_DELAY, DAILY_MAX_DELAY,
+                            daily_results_queue, num_retries=DAILY_MODE_RETRIES
+                        ))
+                    
+                    await asyncio.gather(*daily_run_tasks, return_exceptions=True)
 
-                while not daily_results_queue.empty():
-                    result_type, wallet_name, *counts = await daily_results_queue.get()
-                    if result_type == 'done':
-                        overall_daily_success_tx += counts[0]
-                        overall_daily_failed_tx += counts[1]
-                    elif result_type.startswith('fail_') or result_type == 'skip':
-                        overall_daily_failed_tx += counts[0]
+                    while not daily_results_queue.empty():
+                        result_type, wallet_name, *counts = await daily_results_queue.get()
+                        if result_type == 'done':
+                            overall_daily_success_tx += counts[0]
+                            overall_daily_failed_tx += counts[1]
+                        elif result_type.startswith('fail_') or result_type == 'skip_no_recipients':
+                            overall_daily_failed_tx += counts[0]
 
                 print(f"\n{c['B']}--- Daily Multi Send Finished ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---{c['r']}")
                 final_color = c['g'] if overall_daily_failed_tx == 0 else c['R']
                 print(f"{final_color}{c['B']}Overall Daily Total Transactions: {overall_daily_success_tx} successful, {overall_daily_failed_tx} failed.{c['r']}")
-                print(f"\n{c['c']}Waiting for next cycle ({DAILY_INTERVAL_HOURS} hours)...{c['r']}")
-                await asyncio.sleep(DAILY_INTERVAL_HOURS * 3600)
+                
+                await countdown_timer(DAILY_INTERVAL_HOURS * 3600, message_prefix="Next run in")
+
+                if stop_flag.is_set():
+                    break
             
             else:
-                await scr() # Display explorer and wait for user to press enter
+                await scr() 
                 
                 active_name = current_selection.name if current_selection else "ALL WALLETS"
                 cmd = menu(active_name)
@@ -2704,12 +3102,14 @@ async def main():
                             tasks.append(gh(wallet))
                         await asyncio.gather(*tasks)
                         print(f"{c['g']}All wallets refreshed!{c['r']}")
+                        await expl()
                     else:
                         print(f"{c['c']}Refreshing {current_selection.name}...{c['r']}")
                         current_selection.last_update_time = 0
                         await st(current_selection)
                         await gh(current_selection)
                         print(f"{c['g']}Wallet '{current_selection.name}' refreshed!{c['r']}")
+                        await expl(current_selection)
                     await awaitkey()
                 elif cmd == '3':
                     if current_selection is None:
@@ -2756,7 +3156,11 @@ async def main():
                         print(f"{c['g']}History for wallet '{current_selection.name}' cleared.{c['r']}")
                     await awaitkey()
                 elif cmd == 's':
-                    await select_wallet()
+                    if DAILY_MODE_ACTIVE:
+                        print(f"{c['R']}Cannot change wallet selection while Daily Mode is active. Press Enter to return.{c['r']}")
+                        await awaitkey()
+                    else:
+                        await select_wallet()
                 elif cmd in ['0', 'q', '']:
                     break
                 else:
