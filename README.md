@@ -216,6 +216,15 @@ Once the script is running, you will be presented with a main menu. Here are som
 
 ---
 
+## 📊 Format to Json (FormatToJson.js)
+* in JSON format. You'll be prompted to enter details like Octra addresses and private keys (B64) for each wallet. The final output is a JSON array ready for use on Octra Testnet
+ * How to Use:
+ * 1. Ensure Node.js is installed.
+ * 2. Run from your terminal: `node formattojson.js`
+ * 3. Follow the on-screen prompts.
+ * FormatToJson.js in the GenerateWallet directory will display the JSON output in your console once all data has been entered. You can then copy it and use it in any script that requires it.
+ * FormatToJson.js in the CLI directory will generate and save the data to a wallet.json file, which can be used directly. If a wallet.json file already exists, it will be overwritten when you run the script again. So, make sure to always back up your wallet.json file if it contains important data before running FormatToJson.js again.
+
 ## ⚠️ Disclaimer & Security Guidelines
 
 * These scripts are provided "as-is" for educational and experimental purposes only[cite: 17]. [cite_start]The author and contributors are not responsible for any damages, losses, or legal issues arising from their use[cite: 18].
