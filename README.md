@@ -218,7 +218,7 @@ Once the script is running, you will be presented with a main menu. Here are som
 
 ## 📊 Format to Json (FormatToJson.js)
 * This Script will be prompted to enter details like Octra addresses and private keys (B64) for each wallet. The final output is a JSON array ready for use on Octra Testnet
-* How to Use:
+## How to Use :
  * Ensure Node.js is installed.
  * Run from your terminal: `node FormatToJson.js`
  * Follow the on-screen prompts.
