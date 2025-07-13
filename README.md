@@ -138,7 +138,6 @@ This is a powerful, interactive command-line interface (CLI) tool designed for c
 * **Automated "Daily Multi Send" Mode:** Configure the tool to automatically perform multi-send operations at a predefined daily interval. **This mode can be set up for a single selected wallet or across all loaded wallets.** **Includes configurable retry attempts for failed transactions within daily runs.** To stop the daily mode, **press `Ctrl+C`**.
 * **Real-time Updates:** Displays current balances, nonces, and recent transaction history. Updates automatically on refresh command.
 * **Secure Operations:** Utilizes robust cryptographic libraries for secure transaction signing and encrypted balance management.
-### 🛠️ Installation (CLI Management Tool)
 
 ### 🛠️ Installation (CLI Management Tool)
 
