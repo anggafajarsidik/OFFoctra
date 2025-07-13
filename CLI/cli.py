@@ -598,25 +598,17 @@ async def get_public_key(address, rpc_url, retries=0):
     return None
 
 async def create_private_transfer(to_addr, amount, wallet_obj, retries=0):
+    addr_info = await get_address_info(to_addr, wallet_obj.rpc, retries=0)
+    if not addr_info or not addr_info.get("has_public_key"):
+        print(f"{c['R']}    Skipping private transfer to {to_addr[:20]}...: Recipient has no public key or address not found.{c['r']}")
+        return False, {"error": "Recipient has no public key"}
+    
+    to_public_key = await get_public_key(to_addr, wallet_obj.rpc, retries=0)
+    if not to_public_key:
+        print(f"{c['R']}    Skipping private transfer to {to_addr[:20]}...: Cannot retrieve recipient public key.{c['r']}")
+        return False, {"error": "Cannot get recipient public key"}
+
     for attempt in range(retries + 1):
-        addr_info = await get_address_info(to_addr, wallet_obj.rpc, retries=1)
-        if not addr_info or not addr_info.get("has_public_key"):
-            error_msg = {"error": "Recipient has no public key"}
-            if attempt < retries:
-                print(f"{c['y']}    Retry {attempt+1}/{retries}: Transfer failed! Error: {error_msg['error']}. Retrying...{c['r']}")
-                await asyncio.sleep(random.uniform(1, 3))
-                continue
-            return False, error_msg
-        
-        to_public_key = await get_public_key(to_addr, wallet_obj.rpc, retries=1)
-        if not to_public_key:
-            error_msg = {"error": "Cannot get recipient public key"}
-            if attempt < retries:
-                print(f"{c['y']}    Retry {attempt+1}/{retries}: Transfer failed! Error: {error_msg['error']}. Retrying...{c['r']}")
-                await asyncio.sleep(random.uniform(1, 3))
-                continue
-            return False, error_msg
-        
         data = {
             "from": wallet_obj.addr,
             "to": to_addr,
