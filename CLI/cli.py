@@ -3022,6 +3022,7 @@ async def main():
                 cls()
                 print(f"\n{c['B']}--- Starting Daily Multi Send Run ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---{c['r']}")
                 print(f"{c['y']}(Sit back & let the bot handle it 🧠){c['r']}\n")
+                print(f"{c['y']}(Use a VPS and run it inside a screen session, so you can go nap like a king while your script grinds 😴👑){c['r']}\n")
                 
                 recipients_file = "recipentaddress.txt"
                 
