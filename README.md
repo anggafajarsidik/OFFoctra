@@ -130,14 +130,15 @@ This is a powerful, interactive command-line interface (CLI) tool designed for c
 * **Flexible Wallet Selection:** Choose to operate with a single selected wallet or perform actions across all loaded wallets concurrently.
 * **Proxy Integration:** Supports loading and utilizing proxy URLs from `proxy.txt` for network requests, enhancing privacy and connectivity.
 * **Diverse Transaction Types:**
-    * **Standard Transfers:** Send Octra tokens to any public address with configurable amounts, messages, and multiple repetitions.
-    * **Multi-Send from File:** Automate sending transactions to a list of recipients specified in `recipentaddress.txt`.
-    * **Encrypted Balance Management:** Securely move funds between your public and encrypted (private) balances.
-    * **Private Transfers:** Send tokens directly from your encrypted balance to another Octra address.
-    * **Claim Private Transfers:** Easily claim pending private transfers sent to your wallet(s).
-* **Automated "Daily Multi Send" Mode:** Configure the tool to automatically perform multi-send operations from all loaded wallets at a predefined daily interval.
-* **Real-time Updates:** Displays current balances, nonces, and recent transaction history.
+    * **Standard Transfers:** Send Octra tokens to any public address with configurable amounts, messages, multiple repetitions, and **configurable retry attempts for failed transactions**.
+    * **Multi-Send from File:** Automate sending transactions to a list of recipients specified in `recipentaddress.txt`. Supports **randomized recipient order**, **multiple runs**, and **configurable retry attempts for failed transactions**.
+    * **Encrypted Balance Management:** Securely move funds between your public and encrypted (private) balances, with **configurable retry attempts for failed operations**.
+    * **Private Transfers:** Send tokens directly from your encrypted balance to another Octra address. Supports **randomized recipient order**, **multiple runs**, and **configurable retry attempts for failed transfers**.
+    * **Claim Private Transfers:** Easily claim pending private transfers addressed to your wallet(s), with **configurable retry attempts for failed claims**.
+* **Automated "Daily Multi Send" Mode:** Configure the tool to automatically perform multi-send operations at a predefined daily interval. **This mode can be set up for a single selected wallet or across all loaded wallets.** **Includes configurable retry attempts for failed transactions within daily runs.** To stop the daily mode, **press `Ctrl+C`**.
+* **Real-time Updates:** Displays current balances, nonces, and recent transaction history. Updates automatically on refresh command.
 * **Secure Operations:** Utilizes robust cryptographic libraries for secure transaction signing and encrypted balance management.
+### 🛠️ Installation (CLI Management Tool)
 
 ### 🛠️ Installation (CLI Management Tool)
 
@@ -202,7 +203,7 @@ You must have **Python 3.8 or higher** installed on your system.
 Once the script is running, you will be presented with a main menu. Here are some of the actions you can perform:
 
 * `[1] Send Transaction`: Initiate a standard public transaction.
-* `[2] Refresh Wallet(s)`: Update balance, nonce, and transaction history.
+* `[2] Refresh Wallet(s)`: Update balance, nonce, and transaction history. This is the only command that will display the Wallet Explorer summary.
 * `[3] Multi Send from File`: Send funds to multiple recipients listed in `recipentaddress.txt`.
 * `[4] Encrypt Balance`: Move funds from your public balance to your encrypted balance.
 * `[5] Decrypt Balance`: Move funds from your encrypted balance to your public balance.
