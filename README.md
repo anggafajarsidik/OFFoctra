@@ -37,7 +37,7 @@ You must have **Node.js** (version 18.x or higher) installed on your system.
     ```bash
     npm install
     ```
-    [cite_start]This will install `tweetnacl` and `bip39`, which are required for key generation[cite: 11].
+    This will install `tweetnacl` and `bip39`, which are required for key generation.
 
 ### 💻 How to Use (Wallet Generator)
 1.  **Run the script from your terminal:**
